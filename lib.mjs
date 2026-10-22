@@ -263,6 +263,166 @@ export function applyAccept(root, { path, set, add }) {
   else o[last] = set;
 }
 
+// ---------- Versions ----------
+const PRE_RANK = { dev: 0, alpha: 1, a: 1, beta: 2, b: 2, pre: 3, preview: 3, rc: 4 };
+const vparts = v => String(v).trim().replace(/^v/i, '').split(/[.\-_+~]/).filter(Boolean).flatMap(p => p.match(/\d+|[a-z]+/gi) || []);
+const isNum = s => /^\d+$/.test(s);
+
+// Like PHP's version_compare for the cases that matter: 1.0 = 1.0.0, 1.0-beta < 1.0 < 1.0.1, rc > beta
+export function compareVersions(a, b) {
+  const x = vparts(a), y = vparts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    let p = x[i], q = y[i];
+    if (p === undefined && isNum(q)) p = '0';
+    if (q === undefined && isNum(p)) q = '0';
+    if (p === undefined) return q.toLowerCase() in PRE_RANK ? 1 : -1;
+    if (q === undefined) return p.toLowerCase() in PRE_RANK ? -1 : 1;
+    if (isNum(p) && isNum(q)) { const d = Number(p) - Number(q); if (d) return Math.sign(d); continue; }
+    if (isNum(p) !== isNum(q)) return isNum(p) ? 1 : -1;
+    const rp = PRE_RANK[p.toLowerCase()], rq = PRE_RANK[q.toLowerCase()];
+    const d = rp !== undefined && rq !== undefined ? rp - rq : p.toLowerCase().localeCompare(q.toLowerCase());
+    if (d) return Math.sign(d);
+  }
+  return 0;
+}
+
+// Wordfence range: [from, fromInclusive, to, toInclusive]; "*" means unbounded
+export function inRange(version, [from, fromInc, to, toInc]) {
+  if (from && from !== '*') { const c = compareVersions(version, from); if (c < 0 || (c === 0 && !fromInc)) return false; }
+  if (to && to !== '*') { const c = compareVersions(version, to); if (c > 0 || (c === 0 && !toInc)) return false; }
+  return true;
+}
+
+// ---------- WordPress (Wordfence Intelligence v3) ----------
+// Slim index of the feed: "plugin:<slug>" → vulnerabilities, so only what matching needs is kept in memory and on disk
+export function indexWordfence(feed) {
+  const idx = {};
+  for (const v of Object.values(feed || {})) {
+    if (v.informational) continue;
+    for (const s of v.software || []) {
+      (idx[`${s.type}:${s.slug}`] ||= []).push({
+        id: v.id, title: v.title, score: v.cvss?.score ?? null, rating: v.cvss?.rating || '', cve: v.cve || null,
+        ranges: Object.values(s.affected_versions || {}).map(r => [r.from_version, r.from_inclusive, r.to_version, r.to_inclusive]),
+        patched: !!s.patched, fix: s.patched_versions || [],
+      });
+    }
+  }
+  return idx;
+}
+
+export const wpKey = item => `${item.wp}:${item.slug || (item.wp === 'core' ? 'wordpress' : '')}`;
+export const wpMatches = (idx, item) => (idx[wpKey(item)] || []).filter(v => v.ranges.some(r => inRange(item.version, r)));
+
+export function wpPriority({ score, title, inKev, criticality }) {
+  if (inKev || (score >= 9 && (criticality === 'high' || /\bunauthenticated\b/i.test(title)))) return 'P1';
+  return score >= 7 ? 'P2' : 'P3';
+}
+
+// ---------- Pushed inventory: parse what collectors send ----------
+const OSV_ECO = { npm: 'npm', composer: 'Packagist', pypi: 'PyPI', golang: 'Go', maven: 'Maven', gem: 'RubyGems', cargo: 'crates.io', nuget: 'NuGet', hex: 'Hex', pub: 'Pub' };
+
+// Package URL (https://github.com/package-url/purl-spec) → OSV query item
+export function purlToItem(purl) {
+  const m = /^pkg:([^/]+)\/([^?#]+)(?:\?([^#]*))?/.exec(String(purl || ''));
+  if (!m) return null;
+  const type = m[1].toLowerCase(), at = m[2].lastIndexOf('@');
+  if (at <= 0) return null;
+  const path = m[2].slice(0, at).split('/').map(decodeURIComponent), version = decodeURIComponent(m[2].slice(at + 1));
+  const q = Object.fromEntries(new URLSearchParams(m[3] || ''));
+  if (type === 'deb') {
+    const d = /^(debian|ubuntu)-([\d.]+)/i.exec(q.distro || '');
+    return d ? { ecosystem: d[1].toLowerCase() === 'debian' ? `Debian:${d[2].split('.')[0]}` : `Ubuntu:${d[2]}`, name: path.at(-1), version } : null;
+  }
+  if (type === 'apk') {
+    const d = /(\d+\.\d+)/.exec(q.distro || '');
+    return d ? { ecosystem: `Alpine:v${d[1]}`, name: path.at(-1), version } : null;
+  }
+  if (!OSV_ECO[type]) return null;
+  const name = type === 'maven' ? path.join(':') : type === 'pypi' ? path.at(-1) : path.join('/');
+  return { ecosystem: OSV_ECO[type], name, version: type === 'composer' ? version.replace(/^v/, '') : version };
+}
+
+export function npmLockItems(lock) {
+  const out = [];
+  if (lock?.packages) {
+    for (const [p, v] of Object.entries(lock.packages)) {
+      if (!p || v.dev || v.link || !v.version) continue; // "" is the project itself; dev dependencies are not deployed
+      out.push({ ecosystem: 'npm', name: v.name || p.slice(p.lastIndexOf('node_modules/') + 13), version: v.version });
+    }
+  } else if (lock?.dependencies) {
+    const walk = deps => { for (const [name, v] of Object.entries(deps)) {
+      if (!v.dev && v.version && /^\d/.test(v.version)) out.push({ ecosystem: 'npm', name, version: v.version });
+      if (v.dependencies) walk(v.dependencies);
+    } };
+    walk(lock.dependencies);
+  }
+  return out;
+}
+
+export const composerLockItems = lock => (lock?.packages || [])
+  .filter(p => p.name && p.version && !/^dev-/.test(p.version))
+  .map(p => ({ ecosystem: 'Packagist', name: p.name, version: String(p.version).replace(/^v/, '') }));
+
+export function cyclonedxItems(bom) {
+  const out = [], walk = list => { for (const c of list || []) { const i = purlToItem(c.purl); if (i) out.push(i); walk(c.components); } };
+  walk(bom?.components);
+  return out;
+}
+
+export const spdxItems = doc => (doc?.packages || []).flatMap(p => (p.externalRefs || [])
+  .filter(r => r.referenceType === 'purl').map(r => purlToItem(r.referenceLocator)).filter(Boolean));
+
+// OS and runtimes → endoflife.date ids (and KEV phrases where the product name alone is ambiguous)
+const OS_EOL = { ubuntu: 'ubuntu', debian: 'debian', rhel: 'rhel', rocky: 'rocky-linux', almalinux: 'almalinux', centos: 'centos', alpine: 'alpine', fedora: 'fedora', opensuse: 'opensuse', sles: 'sles', amzn: 'amazon-linux' };
+const RUNTIME = { php: {}, nodejs: {}, node: { eol: 'nodejs', product: 'nodejs' }, python: {}, nginx: {}, apache: { eol: 'apache-http-server', kev: ['apache http server'] },
+  mysql: {}, mariadb: {}, postgresql: {}, redis: {}, openssl: {}, wordpress: {} };
+
+export function parsePush(body) {
+  const stack = [], errors = [];
+  for (const [i, part] of (Array.isArray(body?.parts) ? body.parts : []).entries()) {
+    try {
+      switch (part?.kind) {
+        case 'wp':
+          if (part.core) stack.push({ wp: 'core', slug: 'wordpress', product: 'wordpress', eol: 'wordpress', version: String(part.core).trim() });
+          for (const [type, list] of [['plugin', part.plugins], ['theme', part.themes]])
+            for (const p of list || []) if (p?.name && p.version) stack.push({ wp: type, slug: p.name, version: String(p.version), ...(p.status && { status: p.status }) });
+          break;
+        case 'npm-lock': stack.push(...npmLockItems(part.lock)); break;
+        case 'composer-lock': stack.push(...composerLockItems(part.lock)); break;
+        case 'cyclonedx': stack.push(...cyclonedxItems(part.bom)); break;
+        case 'spdx': stack.push(...spdxItems(part.doc)); break;
+        case 'os': {
+          const id = String(part.id || '').toLowerCase();
+          if (OS_EOL[id] && part.version) stack.push({ product: id, eol: OS_EOL[id], version: String(part.version) });
+          break;
+        }
+        case 'runtime': {
+          const n = String(part.name || '').toLowerCase(), r = RUNTIME[n];
+          if (r && part.version) stack.push({ product: r.product || n, eol: r.eol || n, version: String(part.version).replace(/^v/, ''), ...(r.kev && { kev: r.kev }) });
+          break;
+        }
+        default: errors.push(`part ${i}: unknown kind "${part?.kind}"`);
+      }
+    } catch (e) { errors.push(`part ${i} (${part?.kind}): ${e.message}`); }
+  }
+  return { stack: dedupeStack(stack).slice(0, 20_000), errors };
+}
+
+const stackKey = s => (s.wp ? `wp:${wpKey(s)}@${s.version}` : s.ecosystem ? `${s.ecosystem}:${s.name}@${s.version}` : `${s.product}@${s.version}`);
+export function dedupeStack(list) {
+  const seen = new Map();
+  for (const s of list) if (!seen.has(stackKey(s))) seen.set(stackKey(s), s);
+  return [...seen.values()];
+}
+
+// An asset expects pushes once it has pushed (default 48 h) or when inventoryMaxAgeHours is set
+export function inventoryStale(asset, rec, now = Date.now()) {
+  const maxH = asset.inventoryMaxAgeHours ?? (rec?.at ? 48 : null);
+  if (!maxH) return null;
+  const ref = rec?.at || rec?.since || now, hours = Math.floor((now - ref) / 3600_000);
+  return now - ref > maxH * 3600_000 ? { hours, never: !rec?.at, maxH } : null;
+}
+
 export function localClock(timeZone, date = new Date()) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
     timeZone, hourCycle: 'h23', hour: 'numeric', year: 'numeric', month: '2-digit', day: '2-digit',

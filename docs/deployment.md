@@ -69,4 +69,4 @@ git pull && sudo systemctl restart vigia      # systemd
 
 ## Backups
 
-Back up `data/inventory.json`, since it is your source of truth. `data/state.json` can be deleted at any time. Vigía rebuilds it, but the next scan treats every asset as new and sends an onboarding summary again.
+Back up `data/inventory.json`, since it is your source of truth. `data/pushed.json` (inventories pushed by servers) and `data/wordfence.json` (feed cache) are rebuilt by the next push and download. `data/state.json` can be deleted at any time. Vigía rebuilds it, but the next scan treats every asset as new and sends an onboarding summary again.

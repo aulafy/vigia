@@ -255,3 +255,112 @@ test('backupFindings', () => {
   assert.deepEqual(L.backupFindings(job, { lastSuccess: now, lastRestoreTest: now, lastBytes: 100, bytesHistory: [1000, 1100] }, now), []);
   assert.deepEqual(L.backupFindings({}, { since: now - 23 * H }, now), []);
 });
+
+test('compareVersions', () => {
+  const c = L.compareVersions;
+  assert.equal(c('1.0', '1.0.0'), 0);
+  assert.equal(c('v2.4', '2.4.0'), 0);
+  assert.equal(c('5.8.10', '5.8.9'), 1);
+  assert.equal(c('1.0-beta', '1.0'), -1);
+  assert.equal(c('1.0', '1.0-rc1'), 1);
+  assert.equal(c('1.0-rc1', '1.0-beta2'), 1);
+  assert.equal(c('1.0.1', '1.0-beta'), 1);
+  assert.equal(c('2.0.0', '10.0'), -1);
+});
+
+test('inRange with inclusive and open bounds', () => {
+  assert.ok(L.inRange('5.8.2', ['*', true, '5.8.3', false]));
+  assert.ok(!L.inRange('5.8.3', ['*', true, '5.8.3', false]));
+  assert.ok(L.inRange('5.8.3', ['*', true, '5.8.3', true]));
+  assert.ok(!L.inRange('2.0', ['2.0', false, '*', true]));
+  assert.ok(L.inRange('2.1', ['2.0', true, '2.5', true]));
+  assert.ok(!L.inRange('1.9', ['2.0', true, '2.5', true]));
+});
+
+const WF_FEED = {
+  'aaa': { id: 'aaa', title: 'Contact Form 7 <= 5.3.1 - Unauthenticated Arbitrary File Upload', informational: false, cve: 'CVE-2020-35489',
+    cvss: { score: 10, rating: 'Critical', vector: 'x' },
+    software: [{ type: 'plugin', slug: 'contact-form-7', name: 'Contact Form 7', patched: true, patched_versions: ['5.3.2'],
+      affected_versions: { '* - 5.3.1': { from_version: '*', from_inclusive: true, to_version: '5.3.1', to_inclusive: true } } }] },
+  'bbb': { id: 'bbb', title: 'Info only', informational: true, software: [{ type: 'plugin', slug: 'contact-form-7', affected_versions: {}, patched: false, patched_versions: [] }] },
+  'ccc': { id: 'ccc', title: 'WordPress Core < 6.4.3 - Authenticated PHP Object Injection', cvss: { score: 7.2, rating: 'High' }, cve: null,
+    software: [{ type: 'core', slug: 'wordpress', patched: true, patched_versions: ['6.4.3'],
+      affected_versions: { '6.4 - 6.4.2': { from_version: '6.4', from_inclusive: true, to_version: '6.4.2', to_inclusive: true } } }] },
+};
+
+test('indexWordfence and wpMatches', () => {
+  const idx = L.indexWordfence(WF_FEED);
+  assert.deepEqual(Object.keys(idx).sort(), ['core:wordpress', 'plugin:contact-form-7']);
+  assert.equal(idx['plugin:contact-form-7'].length, 1); // informational skipped
+  assert.deepEqual(L.wpMatches(idx, { wp: 'plugin', slug: 'contact-form-7', version: '5.3.1' }).map(v => v.id), ['aaa']);
+  assert.deepEqual(L.wpMatches(idx, { wp: 'plugin', slug: 'contact-form-7', version: '5.3.2' }), []);
+  assert.deepEqual(L.wpMatches(idx, { wp: 'core', version: '6.4.1' }).map(v => v.id), ['ccc']);
+  assert.deepEqual(L.wpMatches(idx, { wp: 'core', version: '6.3.9' }), []);
+  assert.deepEqual(L.wpMatches(idx, { wp: 'theme', slug: 'nope', version: '1' }), []);
+});
+
+test('wpPriority', () => {
+  assert.equal(L.wpPriority({ score: 10, title: 'X - Unauthenticated RCE', inKev: false, criticality: 'low' }), 'P1');
+  assert.equal(L.wpPriority({ score: 9.1, title: 'X - Authenticated (Admin+) RCE', inKev: false, criticality: 'medium' }), 'P2');
+  assert.equal(L.wpPriority({ score: 9.1, title: 'X - Authenticated', inKev: false, criticality: 'high' }), 'P1');
+  assert.equal(L.wpPriority({ score: 4.3, title: 'X', inKev: true, criticality: 'low' }), 'P1');
+  assert.equal(L.wpPriority({ score: 6.1, title: 'X - Unauthenticated Stored XSS', inKev: false, criticality: 'high' }), 'P3');
+  assert.equal(L.wpPriority({ score: null, title: 'X', inKev: false, criticality: 'high' }), 'P3');
+});
+
+test('purlToItem', () => {
+  assert.deepEqual(L.purlToItem('pkg:npm/%40babel/core@7.22.0'), { ecosystem: 'npm', name: '@babel/core', version: '7.22.0' });
+  assert.deepEqual(L.purlToItem('pkg:composer/guzzlehttp/guzzle@v7.4.0'), { ecosystem: 'Packagist', name: 'guzzlehttp/guzzle', version: '7.4.0' });
+  assert.deepEqual(L.purlToItem('pkg:pypi/django@4.2.1'), { ecosystem: 'PyPI', name: 'django', version: '4.2.1' });
+  assert.deepEqual(L.purlToItem('pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1'), { ecosystem: 'Maven', name: 'org.apache.logging.log4j:log4j-core', version: '2.14.1' });
+  assert.deepEqual(L.purlToItem('pkg:deb/debian/openssl@3.0.11-1~deb12u2?arch=amd64&distro=debian-12.4'), { ecosystem: 'Debian:12', name: 'openssl', version: '3.0.11-1~deb12u2' });
+  assert.deepEqual(L.purlToItem('pkg:deb/ubuntu/openssl@3.0.2?distro=ubuntu-22.04'), { ecosystem: 'Ubuntu:22.04', name: 'openssl', version: '3.0.2' });
+  assert.deepEqual(L.purlToItem('pkg:apk/alpine/musl@1.2.4-r2?distro=3.19.1'), { ecosystem: 'Alpine:v3.19', name: 'musl', version: '1.2.4-r2' });
+  assert.equal(L.purlToItem('pkg:deb/debian/openssl@3.0'), null); // no distro: ecosystem unknown
+  assert.equal(L.purlToItem('pkg:generic/foo@1'), null);
+  assert.equal(L.purlToItem('not a purl'), null);
+});
+
+test('lockfile parsers skip dev dependencies', () => {
+  const v3 = { packages: { '': { name: 'app' }, 'node_modules/lodash': { version: '4.17.15' }, 'node_modules/jest': { version: '29.0.0', dev: true },
+    'node_modules/a/node_modules/@scope/b': { version: '1.0.0' }, 'node_modules/local': { link: true } } };
+  assert.deepEqual(L.npmLockItems(v3).map(x => `${x.name}@${x.version}`), ['lodash@4.17.15', '@scope/b@1.0.0']);
+  const v1 = { dependencies: { lodash: { version: '4.17.15', dependencies: { x: { version: '1.0.0' } } }, jest: { version: '29.0.0', dev: true }, g: { version: 'git+https://x' } } };
+  assert.deepEqual(L.npmLockItems(v1).map(x => `${x.name}@${x.version}`), ['lodash@4.17.15', 'x@1.0.0']);
+  const comp = { packages: [{ name: 'guzzlehttp/guzzle', version: 'v7.4.0' }, { name: 'x/y', version: 'dev-main' }], 'packages-dev': [{ name: 'phpunit/phpunit', version: '10.0.0' }] };
+  assert.deepEqual(L.composerLockItems(comp), [{ ecosystem: 'Packagist', name: 'guzzlehttp/guzzle', version: '7.4.0' }]);
+});
+
+test('SBOM parsers', () => {
+  const bom = { components: [{ purl: 'pkg:npm/lodash@4.17.15', components: [{ purl: 'pkg:pypi/django@4.2.1' }] }, { name: 'no purl' }] };
+  assert.deepEqual(L.cyclonedxItems(bom).map(x => x.name), ['lodash', 'django']);
+  const spdx = { packages: [{ externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:npm/lodash@4.17.15' }, { referenceType: 'cpe23Type', referenceLocator: 'cpe:x' }] }] };
+  assert.deepEqual(L.spdxItems(spdx), [{ ecosystem: 'npm', name: 'lodash', version: '4.17.15' }]);
+});
+
+test('parsePush builds a deduplicated stack and reports bad parts', () => {
+  const { stack, errors } = L.parsePush({ parts: [
+    { kind: 'wp', core: '6.4.1', plugins: [{ name: 'contact-form-7', status: 'inactive', version: '5.3.1' }], themes: [{ name: 'astra', version: '4.0' }] },
+    { kind: 'os', id: 'ubuntu', version: '22.04' }, { kind: 'os', id: 'templeos', version: '1' },
+    { kind: 'runtime', name: 'php', version: '8.1.27' }, { kind: 'runtime', name: 'node', version: 'v20.11.0' }, { kind: 'runtime', name: 'apache', version: '2.4.58' },
+    { kind: 'npm-lock', lock: { packages: { 'node_modules/lodash': { version: '4.17.15' } } } },
+    { kind: 'cyclonedx', bom: { components: [{ purl: 'pkg:npm/lodash@4.17.15' }] } },
+    { kind: 'bogus' },
+  ] });
+  assert.deepEqual(errors, ['part 8: unknown kind "bogus"']);
+  const keys = stack.map(s => s.wp ? `${s.wp}:${s.slug}@${s.version}` : s.ecosystem ? `${s.ecosystem}:${s.name}@${s.version}` : `${s.product}/${s.eol}@${s.version}`);
+  assert.deepEqual(keys, ['core:wordpress@6.4.1', 'plugin:contact-form-7@5.3.1', 'theme:astra@4.0', 'ubuntu/ubuntu@22.04',
+    'php/php@8.1.27', 'nodejs/nodejs@20.11.0', 'apache/apache-http-server@2.4.58', 'npm:lodash@4.17.15']);
+  assert.equal(stack[1].status, 'inactive');
+  assert.deepEqual(stack[6].kev, ['apache http server']);
+  assert.deepEqual(L.parsePush({}).stack, []);
+});
+
+test('inventoryStale', () => {
+  const H = 3600_000, now = Date.parse('2026-10-22T10:00:00Z');
+  assert.equal(L.inventoryStale({}, undefined, now), null); // never pushed, no expectation
+  assert.equal(L.inventoryStale({}, { at: now - 47 * H }, now), null);
+  assert.deepEqual(L.inventoryStale({}, { at: now - 50 * H }, now), { hours: 50, never: false, maxH: 48 });
+  assert.deepEqual(L.inventoryStale({ inventoryMaxAgeHours: 24 }, { since: now - 30 * H }, now), { hours: 30, never: true, maxH: 24 });
+  assert.equal(L.inventoryStale({ inventoryMaxAgeHours: 24 }, { since: now - 2 * H }, now), null);
+});

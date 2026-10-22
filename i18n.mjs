@@ -85,6 +85,13 @@ const en = {
     shrunk: `${f.bytes} bytes against a usual ${Math.round(f.median)}. Data may be missing, or ransomware may have encrypted the source.`,
   }[f.kind]),
   backupOk: j => `backup ${j.id} OK`,
+  wp: (a, it, v, kev) => `${a.client}: ${it.wp === 'core' ? 'WordPress' : it.slug} ${it.version} — ${v.title}${kev ? ' (EXPLOITED)' : ''}`,
+  wpBody: (a, it, v) => `${a.name}. ${it.wp === 'core' ? 'WordPress core' : `${it.wp} ${it.slug}${it.status === 'inactive' ? ' (inactive, still exploitable while installed)' : ''}`}. CVSS ${v.score ?? '?'} ${v.rating}. ${v.cve || ''} ${v.patched ? `Fix: update to ${v.fix.join(' / ')}.` : 'No fix available: remove or replace it.'} Source: Wordfence Intelligence.`,
+  wpFixed: 'no longer affected (updated or removed)',
+  wpNoKey: 'Vigía: WordPress components are not being checked',
+  wpNoKeyBody: n => `${n} assets list WordPress core, plugins or themes, but WORDFENCE_API_KEY is not set. Get a free key at wordfence.com/products/wordfence-intelligence.`,
+  invStale: a => `${a.client}: inventory of ${a.name} is out of date`,
+  invStaleBody: f => f.never ? `No inventory received in ${f.hours} h (expected every ${f.maxH} h). Vulnerability matching may be using old versions. Check the collector on the server.` : `Last inventory ${f.hours} h ago (expected every ${f.maxH} h). Vulnerability matching may be using old versions.`,
 };
 
 const es = {
@@ -173,6 +180,13 @@ const es = {
     shrunk: `${f.bytes} bytes frente a los ${Math.round(f.median)} habituales. Pueden faltar datos o un ransomware puede haber cifrado el origen.`,
   }[f.kind]),
   backupOk: j => `copia ${j.id} correcta`,
+  wp: (a, it, v, kev) => `${a.client}: ${it.wp === 'core' ? 'WordPress' : it.slug} ${it.version} — ${v.title}${kev ? ' (EXPLOTADA)' : ''}`,
+  wpBody: (a, it, v) => `${a.name}. ${it.wp === 'core' ? 'Núcleo de WordPress' : `${it.wp === 'plugin' ? 'plugin' : 'tema'} ${it.slug}${it.status === 'inactive' ? ' (inactivo, sigue siendo explotable mientras esté instalado)' : ''}`}. CVSS ${v.score ?? '?'} ${v.rating}. ${v.cve || ''} ${v.patched ? `Solución: actualizar a ${v.fix.join(' / ')}.` : 'Sin parche: elimínalo o sustitúyelo.'} Fuente: Wordfence Intelligence.`,
+  wpFixed: 'ya no afecta (actualizado o eliminado)',
+  wpNoKey: 'Vigía: los componentes de WordPress no se están comprobando',
+  wpNoKeyBody: n => `${n} activos tienen núcleo, plugins o temas de WordPress, pero falta WORDFENCE_API_KEY. Consigue una clave gratuita en wordfence.com/products/wordfence-intelligence.`,
+  invStale: a => `${a.client}: el inventario de ${a.name} está desactualizado`,
+  invStaleBody: f => f.never ? `No ha llegado ningún inventario en ${f.hours} h (se espera cada ${f.maxH} h). El cruce de vulnerabilidades puede estar usando versiones antiguas. Revisa el colector del servidor.` : `Último inventario hace ${f.hours} h (se espera cada ${f.maxH} h). El cruce de vulnerabilidades puede estar usando versiones antiguas.`,
 };
 
 export const messages = lang => (String(lang).toLowerCase().startsWith('es') ? es : en);

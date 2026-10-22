@@ -27,6 +27,7 @@ Vigía re-reads the file on every cycle. Invalid entries are skipped and reporte
 | `strictScripts` | no | `true` | A new third-party script becomes P1 instead of P2. |
 | `ignoreKeywords` | no | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
 | `skip` | no | `["content"]` | Checks to turn off for this asset: `domain`, `dns`, `mail`, `content`. |
+| `inventoryMaxAgeHours` | no | `24` | Expect a pushed inventory at least this often (see [inventory-push.md](inventory-push.md#freshness)). |
 | `backups` | no | `[{ "id": "db", "rpoHours": 24 }]` | Backup jobs that report to Vigía. Fields and setup are in [backups.md](backups.md). |
 
 The legacy Spanish field names `cliente`, `criticidad` (`alta`/`media`/`baja`) and `contacto` are also accepted.
@@ -53,6 +54,12 @@ A stack entry describes one piece of software. Which fields you fill decides whi
 ```json
 { "product": "php", "version": "8.1.27", "eol": "php" }
 ```
+*End-of-life* (see below). This entry is also checked against KEV, because it has a `product`.
+
+```json
+{ "wp": "plugin", "slug": "contact-form-7", "version": "5.9" }
+```
+*WordPress.* Matched against Wordfence Intelligence. Use `"wp": "core"` (no slug needed) for WordPress itself, and `"theme"` for themes. See [inventory-push.md](inventory-push.md#wordpress-vulnerabilities-wordfence-intelligence).
 *End-of-life.* `eol` is the product id on [endoflife.date](https://endoflife.date). The version is matched to the most specific release cycle (`8.1.27` belongs to cycle `8.1`). This entry is also checked against KEV, because it has a `product`.
 
 ### OSV ecosystems
@@ -91,6 +98,11 @@ Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`,
 | SPF/DMARC missing, `+all`, `p=none` or duplicated (audit) | P3 | P3 |
 | Backup failed, or no success within the RPO | P1 | P2 |
 | Backup much smaller than usual, or restore test overdue | P2 | P2 |
+| WordPress: KEV, or CVSS ≥ 9 and unauthenticated | P1 | P1 |
+| WordPress: CVSS ≥ 9 (authenticated) | P1 | P2 |
+| WordPress: CVSS ≥ 7 | P2 | P2 |
+| WordPress: lower or unscored | P3 | P3 |
+| Pushed inventory older than its window | P2 | P2 |
 
 ## Domain, DNS and content checks
 
@@ -121,7 +133,7 @@ On the very first run, Vigía records the whole KEV catalogue but alerts only on
 
 ## Building the inventory quickly
 
-Writing the inventory by hand works for a dozen sites. Beyond that, generate it:
+Writing the inventory by hand works for a dozen sites. Beyond that, **let the servers push it**: [inventory-push.md](inventory-push.md) covers `vigia-collect.sh`, which reads WP-CLI, lockfiles, SBOMs, the OS and runtimes. To build a static inventory instead:
 
 - **Node projects:** `npm ls --all --json` or the `package-lock.json`. Every package with a version becomes `{ "ecosystem": "npm", "name": …, "version": … }`.
 - **PHP projects:** `composer show --format=json` or `composer.lock`, with `"ecosystem": "Packagist"`.

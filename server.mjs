@@ -25,12 +25,13 @@ const {
   NTFY_TOPIC, NTFY_SERVER = 'https://ntfy.sh', NTFY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_URL,
   HEARTBEAT_URL, PUBLIC_URL, ACK_SECRET, DIGEST_HOUR = '9', DIGEST_TZ = process.env.TZ_DIGEST || 'Europe/Madrid',
   DNS_SERVERS = '1.1.1.1,8.8.8.8', HEARTBEAT_FAIL_URL, CHECKIN_SECRET, CANARY_DAYS = '7', CANARY_ACK_HOURS = '24',
+  WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
 const REPEAT_P1_MS = 10 * 60_000;
-const UA = { 'user-agent': 'vigia/0.5 (+https://github.com/aulafy/vigia)' };
+const UA = { 'user-agent': 'vigia/0.6 (+https://github.com/aulafy/vigia)' };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'), INV);
@@ -42,7 +43,13 @@ try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } c
 // Atomic write: a crash mid-write cannot corrupt the state file
 const save = () => { fs.writeFileSync(STATE_F + '.tmp', JSON.stringify(state, null, 1)); fs.renameSync(STATE_F + '.tmp', STATE_F); };
 
-// Re-read on every cycle, so editing the inventory needs no restart
+// Inventories pushed by collectors live in their own file: they can be large and only change on a push
+const PUSHED_F = process.env.VIGIA_PUSHED || path.join(DATA, 'pushed.json');
+let pushed = {};
+try { pushed = JSON.parse(fs.readFileSync(PUSHED_F, 'utf8')); } catch {}
+const savePushed = () => { fs.writeFileSync(PUSHED_F + '.tmp', JSON.stringify(pushed)); fs.renameSync(PUSHED_F + '.tmp', PUSHED_F); };
+
+// Re-read on every cycle, so editing the inventory needs no restart. The pushed stack is merged into the declared one.
 let lastInvErr = '';
 function inventory({ includePaused = false } = {}) {
   let res;
@@ -51,6 +58,7 @@ function inventory({ includePaused = false } = {}) {
   const err = res.errors.join('; ');
   if (err && err !== lastInvErr) log('inventory:', err);
   lastInvErr = err;
+  for (const a of res.assets) if (pushed[a.id]?.stack) a.stack = L.dedupeStack([...a.stack, ...pushed[a.id].stack]);
   return includePaused ? res.assets : res.assets.filter(a => !a.paused);
 }
 
@@ -245,23 +253,80 @@ async function osvDetails(id) {
 }
 
 async function checkOSV(inv) {
-  const q = [];
-  for (const a of inv) for (const s of a.stack) if (s.ecosystem && s.name && s.version) q.push({ a, s });
-  const found = new Set();
-  for (let i = 0; i < q.length; i += 100) {
-    const chunk = q.slice(i, i + 100);
+  // Each package version is queried once, however many assets share it (pushed inventories make this matter)
+  const uses = new Map(), assets = new Set();
+  for (const a of inv) for (const s of a.stack) if (s.ecosystem && s.name && s.version) {
+    const k = `${s.ecosystem}\0${s.name}\0${s.version}`;
+    if (!uses.has(k)) uses.set(k, { s, users: [] });
+    uses.get(k).users.push(a);
+    assets.add(a.id);
+  }
+  const q = [...uses.values()], found = new Set();
+  for (let i = 0; i < q.length; i += 500) {
+    const chunk = q.slice(i, i + 500);
     const r = await getJSON('https://api.osv.dev/v1/querybatch', {
       method: 'POST', headers: { ...UA, 'content-type': 'application/json' },
       body: JSON.stringify({ queries: chunk.map(({ s }) => ({ package: { name: s.name, ecosystem: s.ecosystem }, version: s.version })) }),
     });
     for (let k = 0; k < chunk.length; k++) for (const v of r.results[k]?.vulns || []) {
-      const { a, s } = chunk[k], d = await osvDetails(v.id);
-      const inKev = d.cves.some(c => kevSet.has(c)), key = `osv:${v.id}:${a.id}:${s.name}`;
-      found.add(key);
-      raise(key, L.osvPriority({ sev: d.sev, inKev, criticality: a.criticality }), T.osv(a, s, v.id, inKev), T.osvBody(a, d), a.id);
+      const { s, users } = chunk[k], d = await osvDetails(v.id), inKev = d.cves.some(c => kevSet.has(c));
+      for (const a of users) {
+        const key = `osv:${v.id}:${a.id}:${s.name}`;
+        found.add(key);
+        raise(key, L.osvPriority({ sev: d.sev, inKev, criticality: a.criticality }), T.osv(a, s, v.id, inKev), T.osvBody(a, d), a.id);
+      }
     }
   }
-  prune('osv', new Set(q.map(x => x.a.id)), found, T.osvFixed);
+  prune('osv', assets, found, T.osvFixed);
+}
+
+// ---------- WordPress core, plugins and themes: Wordfence Intelligence v3 (match every 30 min, feed every 6 h) ----------
+const WF_F = process.env.VIGIA_WORDFENCE || path.join(DATA, 'wordfence.json');
+let wf = { at: 0, idx: null };
+try { wf = JSON.parse(fs.readFileSync(WF_F, 'utf8')); } catch {}
+
+async function wordfenceIndex() {
+  if (wf.idx && Date.now() - wf.at < +WORDFENCE_HOURS * 3600_000) return wf.idx;
+  let feed;
+  try {
+    const r = await fetch(WORDFENCE_URL, {
+      headers: { ...UA, authorization: `Bearer ${WORDFENCE_API_KEY}` }, signal: AbortSignal.timeout(180_000),
+    });
+    if (!r.ok) { await r.body?.cancel(); throw new Error(`Wordfence feed HTTP ${r.status}${r.status === 401 ? ' (check WORDFENCE_API_KEY)' : ''}`); }
+    feed = await r.json();
+  } catch (e) {
+    // a briefly unreachable feed is not a blind spot yet: keep matching with the cached copy for up to a day
+    if (wf.idx && Date.now() - wf.at < 864e5) { log('wordfence refresh failed, using cached feed:', e.message); return wf.idx; }
+    throw e;
+  }
+  wf = { at: Date.now(), idx: L.indexWordfence(feed) };
+  fs.writeFileSync(WF_F + '.tmp', JSON.stringify(wf)); fs.renameSync(WF_F + '.tmp', WF_F);
+  log(`wordfence: ${Object.keys(wf.idx).length} components indexed`);
+  return wf.idx;
+}
+
+async function checkWordPress(inv) {
+  const users = inv.filter(a => a.stack.some(s => s.wp && s.version));
+  if (!users.length) return resolve('wp:nokey', '', { quiet: true });
+  if (!WORDFENCE_API_KEY) return raise('wp:nokey', 'P3', T.wpNoKey, T.wpNoKeyBody(users.length), null);
+  resolve('wp:nokey', '', { quiet: true });
+  const idx = await wordfenceIndex(), found = new Set();
+  for (const a of users) for (const it of a.stack.filter(s => s.wp && s.version)) for (const v of L.wpMatches(idx, it)) {
+    const inKev = !!v.cve && kevSet.has(v.cve), key = `wp:${v.id}:${a.id}:${L.wpKey(it)}`;
+    found.add(key);
+    raise(key, L.wpPriority({ score: v.score, title: v.title, inKev, criticality: a.criticality }), T.wp(a, it, v, inKev), T.wpBody(a, it, v), a.id);
+  }
+  prune('wp', new Set(users.map(a => a.id)), found, T.wpFixed);
+}
+
+// ---------- Pushed inventory: freshness (every 15 min) ----------
+async function checkInventoryAge(inv) {
+  for (const a of inv) {
+    if (a.inventoryMaxAgeHours && !pushed[a.id]) { pushed[a.id] = { since: Date.now() }; savePushed(); }
+    const f = L.inventoryStale(a, pushed[a.id]);
+    if (f) raise(`inv:stale:${a.id}`, 'P2', T.invStale(a), T.invStaleBody(f), a.id);
+    else resolve(`inv:stale:${a.id}`, '', { quiet: true });
+  }
 }
 
 // ---------- End of life (every 6 h) ----------
@@ -469,11 +534,17 @@ function readBody(req, max = 64 * 1024) {
 // POST /api/backup/<assetId>/<jobId>?status=start|success|fail|restore
 // headers: x-vigia-timestamp (unix seconds), x-vigia-signature (HMAC, see lib.signCheckin)
 // body (optional JSON): { bytes, objects, durationS, restoreTest: true | "YYYY-MM-DD", message }
+// Shared by backup check-ins and inventory pushes: same secret, same signature scheme
+async function readSigned(req, u, max) {
+  const body = await readBody(req, max), sig = req.headers['x-vigia-signature'];
+  const ok = L.verifyCheckin({ secret: CHECKIN_SECRET, ts: req.headers['x-vigia-timestamp'], path: u.pathname + u.search, body, sig });
+  return { ok, body, sig };
+}
+
 async function backupCheckin(req, u) {
   const [, , , assetId, jobId] = u.pathname.split('/').map(decodeURIComponent);
-  const body = await readBody(req);
-  const sig = req.headers['x-vigia-signature'], path = u.pathname + u.search;
-  if (!L.verifyCheckin({ secret: CHECKIN_SECRET, ts: req.headers['x-vigia-timestamp'], path, body, sig })) return [401, { error: 'bad or expired signature' }];
+  const { ok, body, sig } = await readSigned(req, u);
+  if (!ok) return [401, { error: 'bad or expired signature' }];
   const job = jobsOf(inventory({ includePaused: true })).find(x => x.a.id === assetId && x.j.id === jobId);
   if (!job) return [404, { error: `unknown backup job ${assetId}/${jobId}` }];
   const status = u.searchParams.get('status') || 'success';
@@ -496,7 +567,33 @@ async function backupCheckin(req, u) {
   return [200, { ok: true, job: job.key, status }];
 }
 
+// POST /api/inventory/<assetId> — signed like check-ins; body { host, parts: [ {kind: wp|npm-lock|composer-lock|cyclonedx|spdx|os|runtime, …} ] }
+// Replaces the asset's pushed stack. The declared stack in inventory.json is kept and merged.
+async function inventoryPush(req, u) {
+  const assetId = decodeURIComponent(u.pathname.split('/')[3] || '');
+  const { ok, body, sig } = await readSigned(req, u, 16 * 1024 * 1024);
+  if (!ok) return [401, { error: 'bad or expired signature' }];
+  const asset = inventory({ includePaused: true }).find(a => a.id === assetId);
+  if (!asset) return [404, { error: `unknown asset ${assetId}` }];
+  let data;
+  try { data = JSON.parse(body); } catch { return [400, { error: 'body must be JSON' }]; }
+  const prev = pushed[assetId];
+  if (prev?.lastSig === sig) return [409, { error: 'replayed push' }];
+  const { stack, errors } = L.parsePush(data);
+  if (!stack.length) return [400, { error: 'no components recognised', errors }];
+  const first = !prev?.at;
+  pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, lastSig: sig, errors };
+  savePushed();
+  // A first push can bring hundreds of packages: treat it as onboarding, so it is summarised instead of paging per finding
+  if (first) for (const k of ['osv', 'eol', 'wp']) delete state.scanned[`${k}:${assetId}`];
+  setTimeout(() => ['osv', 'wordpress', 'eol', 'inventory'].forEach(n => runners[n]?.()), 500);
+  const count = t => stack.filter(t).length;
+  return [200, { ok: true, asset: assetId, components: stack.length,
+    wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), errors }];
+}
+
 // ---------- Scheduler ----------
+const runners = {}; // name -> run(), so a push can trigger checks right away
 const every = (name, ms, fn) => {
   let busy = false;
   const run = async () => {
@@ -507,6 +604,7 @@ const every = (name, ms, fn) => {
     busy = false;
     save();
   };
+  runners[name] = run;
   run(); setInterval(run, ms);
 };
 every('uptime', 60_000, inv => Promise.all(inv.map(checkAsset)));
@@ -517,9 +615,11 @@ setTimeout(() => every('dns', 5 * 60_000, inv => onboard(inv, 'dns', () => check
 setTimeout(() => every('content', 15 * 60_000, inv => onboard(inv, 'web', () => checkContent(inv))), 20_000); // after the first uptime pass
 setTimeout(() => every('domain', 6 * 3600_000, inv => onboard(inv, 'domain', () => checkDomains(inv))), 40_000);
 every('backups', 5 * 60_000, checkBackups);
+setTimeout(() => every('wordpress', 30 * 60_000, inv => onboard(inv, 'wp', () => checkWordPress(inv))), 25_000); // after KEV is loaded
+every('inventory', 15 * 60_000, checkInventoryAge);
 
 // Watch the watcher: a feed that misses ~3 cycles is a blind spot
-const STALE = { kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000 };
+const STALE = { kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000, wordpress: 2 * 3600_000 };
 every('health', 60_000, async () => {
   for (const [f, max] of Object.entries(STALE)) {
     const t = state.feeds[f];
@@ -587,6 +687,10 @@ http.createServer(async (req, res) => {
       <form method="post"><button style="font-size:18px;padding:12px 20px">${escHtml(T.ack)}</button></form>`);
   }
 
+  if (u.pathname.startsWith('/api/inventory/') && req.method === 'POST') {
+    try { const [code, out] = await inventoryPush(req, u); return json(out, code); }
+    catch (e) { return json({ error: e.message }, 400); }
+  }
   if (u.pathname.startsWith('/api/backup/') && req.method === 'POST') {
     try { const [code, out] = await backupCheckin(req, u); return json(out, code); }
     catch (e) { return json({ error: e.message }, 400); }
@@ -596,7 +700,8 @@ http.createServer(async (req, res) => {
 
   if (u.pathname === '/api/state') return json({
     lang: VIGIA_LANG, inventory: inventory({ includePaused: true }), status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
-    channels: state.channels, chain: state.chain, backups: Object.fromEntries(Object.entries(state.backups).map(([k, v]) => [k, { ...v, lastSig: undefined }])),
+    channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
+    pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: Object.fromEntries(Object.entries(state.backups).map(([k, v]) => [k, { ...v, lastSig: undefined }])),
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }

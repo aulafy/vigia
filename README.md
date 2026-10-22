@@ -13,8 +13,9 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
  Public sources                     Your inventory                  You
  ─────────────────                  ──────────────────              ─────────────────────
  CISA KEV (exploited CVEs) ─┐       client / site / criticality
- OSV (npm, PyPI, Packagist…)┼──▶    product + exact version   ──▶  P1 → push that rings, repeated
- endoflife.date ────────────┘       domain / URL / contact          every 10 min until you ack
+ OSV (npm, PyPI, Packagist…)┤       product + exact version         P1 → push that rings, repeated
+ Wordfence (WordPress) ─────┼──▶    (declared, or pushed daily ──▶       every 10 min until you ack
+ endoflife.date ────────────┘        by each server)
  HTTP + TLS probes every 60 s ─────────────────────────────▶       P2 → push
  RDAP + DNS + page content ── compared with a baseline ────▶       P3 → daily digest
 ```
@@ -32,6 +33,8 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 6 h | **Domain registration** through RDAP: expiry, suspension (hold, redemption), removed transfer lock, changed registrar | Expires < 7 days or suspended: **P1** · < 30 days: P2 · lock removed: P2 · registrar changed: P1 on high criticality |
 | 15 min | **[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)**: CVEs confirmed exploited in the wild, matched against the products in your inventory | High criticality: **P1**, otherwise P2 |
 | 30 min | **[OSV](https://osv.dev)**: known vulnerabilities in the exact versions of your dependencies (npm, Packagist, PyPI, Go, Maven, RubyGems, crates.io, Debian, Ubuntu, Alpine…) | In KEV, or critical on a high-criticality asset: **P1** · critical/high: P2 · other: P3 |
+| 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
+| on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
 | 60 s | **Self-health:** stale feeds, plus an outgoing heartbeat to an external service | P2, or the external service pages you |
 | daily | **Digest** of open P2s and new P3s | one message |
@@ -68,7 +71,7 @@ npm start                         # dashboard on http://localhost:4848
 
 ## The inventory
 
-Everything depends on the inventory. Without it you would get hundreds of CVEs a day with no way to know which ones matter. With it, Vigía alerts only on the ones that affect you.
+Everything depends on the inventory. You can write it by hand, let each server **push** what it runs ([docs/inventory-push.md](docs/inventory-push.md)), or both. Without it you would get hundreds of CVEs a day with no way to know which ones matter. With it, Vigía alerts only on the ones that affect you.
 
 ```json
 [
@@ -98,6 +101,7 @@ Each `stack` entry can feed one or more checks:
 |---|---|---|
 | `product` (+ optional `kev`) | CISA KEV | Matched as a whole word against the KEV vendor and product. `php` matches *PHP* but not *phpMyAdmin*. Use `kev` for exact phrases such as `"apache http server"` or `"fortios"`. |
 | `ecosystem` + `name` + `version` | OSV | An exact package version. `ecosystem` uses OSV names: `npm`, `Packagist`, `PyPI`, `Go`, `Maven`, `RubyGems`, `crates.io`, `NuGet`, `Debian:12`, `Ubuntu:22.04`, `Alpine:v3.19`… |
+| `wp` + `slug` + `version` | Wordfence | A WordPress component: `"wp": "core"`, or `"plugin"`/`"theme"` with the directory name as `slug`. |
 | `eol` + `version` | endoflife.date | The product id on endoflife.date (`php`, `nodejs`, `ubuntu`, `debian`, `mysql`, `postgresql`, `nginx`, `wordpress`…). |
 
 The domain, DNS and content checks need nothing in `stack`, because they work from `domain` and `url`. Useful options on the asset itself:
@@ -111,6 +115,7 @@ The domain, DNS and content checks need nothing in `stack`, because they work fr
 | `ignoreKeywords` | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
 | `skip` | `["content", "dns", "mail", "domain"]` | Turn individual checks off for this asset. |
 | `backups` | `[{ "id": "db", "rpoHours": 24, "restoreTestDays": 30 }]` | Backup jobs that report in. See **[docs/backups.md](docs/backups.md)**. |
+| `inventoryMaxAgeHours` | `24` | Expect a pushed inventory at least this often (default 48 h once the asset has pushed). |
 
 Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented in **[docs/inventory.md](docs/inventory.md)**, along with tips for generating the inventory from lockfiles and SBOMs.
 
@@ -137,7 +142,9 @@ All settings are environment variables, which can live in `.env`:
 | `HEARTBEAT_URL` | — | Pinged every minute (dead man's switch). Receives `/fail` when the alert chain is broken. |
 | `HEARTBEAT_FAIL_URL` | `HEARTBEAT_URL` + `/fail` | Failure URL, for services that use a different one |
 | `CANARY_DAYS`, `CANARY_ACK_HOURS` | `7`, `24` | Weekly test alert that must be acknowledged. `0` turns it off. |
-| `CHECKIN_SECRET` | — | Secret for signed backup check-ins |
+| `CHECKIN_SECRET` | — | Secret for signed backup check-ins and inventory pushes |
+| `WORDFENCE_API_KEY` | — | Free Wordfence Intelligence key, enables WordPress checks |
+| `WORDFENCE_HOURS`, `WORDFENCE_URL` | `6`, the v3 production feed | How often to refresh the feed, and from where (a mirror, for example) |
 | `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed acknowledge links in P1 notifications |
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
 | `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`) |
@@ -154,6 +161,7 @@ All settings are environment variables, which can live in `.env`:
 | `POST /api/ack?key=…` | dashboard | Acknowledge an alert. For a change alert, this also accepts the new value as the baseline. |
 | `GET/POST /api/ack?key=…&sig=…` | signed link | Acknowledge from a notification. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
 | `POST /api/backup/<asset>/<job>?status=…` | HMAC signature | Backup check-in, see [docs/backups.md](docs/backups.md#check-in-protocol) |
+| `POST /api/inventory/<asset>` | HMAC signature | Inventory push, see [docs/inventory-push.md](docs/inventory-push.md#protocol) |
 | `POST /api/test` | dashboard | Send a test P1 to every channel |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
@@ -162,7 +170,7 @@ All settings are environment variables, which can live in `.env`:
 Be honest with your clients about what is covered:
 
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
-- **WordPress and PrestaShop plugins** are only matched by name against KEV. OSV covers them poorly. Dedicated databases such as Wordfence Intelligence or WPScan fill that gap (on the roadmap).
+- **PrestaShop, Joomla and Drupal modules** are not covered by a dedicated feed yet: only through OSV (Composer packages) and KEV. WordPress is covered through Wordfence.
 - **It is not a SIEM, EDR or WAF.** Logs, file integrity, malware and intrusion detection belong to tools like Wazuh, CrowdSec or Cloudflare. Vigía complements them.
 - **It only knows about backups that report in.** It cannot see inside your backup tool. A job that never calls `vigia-checkin.sh` is invisible, and a "success" is only as honest as the script that sends it. Real restore tests remain your job: Vigía only reminds you.
 - **The content check reads the HTML the server sends.** Scripts injected later by JavaScript, for example through a tag manager, or code that only shows up for some visitors (cloaking), are invisible to it. It catches the common cases, but it is not a full malware scanner.
@@ -182,14 +190,17 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 
 ## Roadmap
 
-- WordPress plugin and theme vulnerabilities (Wordfence Intelligence / WPScan)
 - New certificates in Certificate Transparency logs (as P3)
-- Signed inventory push from servers (versions, lockfiles, SBOM) with a maximum age
+- Windows collector (PowerShell) and PrestaShop/Drupal module feeds
 - Optional URL reputation through Google Web Risk
 - Importing the inventory from SBOMs (CycloneDX/SPDX) and lockfiles
 - Built-in PagerDuty Events v2 and Twilio call integrations
 - Vendor advisory RSS feeds (INCIBE-CERT, Ubuntu USN, Debian DSA)
 - Maintenance windows and per-client quiet hours
+
+## Data sources
+
+CISA KEV (public domain), OSV.dev (each record under its source's licence), endoflife.date (MIT), IANA RDAP bootstrap, and Wordfence Intelligence (free for personal and commercial use under Wordfence's terms, cited as the source in every WordPress alert).
 
 ## License
 

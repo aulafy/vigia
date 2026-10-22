@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — 2026-10-22
+
+### Added
+- **Pushed inventory:** signed `POST /api/inventory/<asset>` plus `deploy/vigia-collect.sh`, which collects WordPress core, plugins and themes (WP-CLI), `package-lock.json`, `composer.lock`, CycloneDX and SPDX SBOMs (purls mapped to OSV ecosystems, including Debian, Ubuntu and Alpine), OS and runtime versions. Pushed components are merged with the declared stack and feed KEV, OSV, endoflife.date and Wordfence. A first push is treated as onboarding, and checks run right after each push.
+- **Inventory freshness:** a P2 when an asset has not pushed within `inventoryMaxAgeHours` (default 48 h once it has pushed).
+- **WordPress vulnerabilities** through the Wordfence Intelligence v3 production feed (`WORDFENCE_API_KEY`): exact version ranges, with P1 for KEV or CVSS ≥ 9 unauthenticated or on high-criticality assets. Alerts include the fixed version, and inactive plugins are flagged. The feed is cached and indexed in `data/wordfence.json`, and a cached copy stays in use for 24 h if a download fails.
+- Version comparison for WordPress-style versions (`1.0 = 1.0.0`, `beta < rc < release`).
+
+### Changed
+- OSV is queried once per unique package version across all assets, in batches of 500.
+- The dashboard shortens long stacks and shows each asset's inventory age.
+
 ## 0.5.0 — 2026-10-22
 
 ### Added

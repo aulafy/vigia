@@ -15,7 +15,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs
       - run: npm test
-      - run: sh -n deploy/vigia-checkin.sh
+      - run: sh -n deploy/vigia-checkin.sh && sh -n deploy/vigia-collect.sh
       - run: node -e "JSON.parse(require('fs').readFileSync('inventory.example.json','utf8'))"
   docker:
     runs-on: ubuntu-latest

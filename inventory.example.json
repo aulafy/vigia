@@ -39,6 +39,15 @@
         "ecosystem": "Packagist",
         "name": "guzzlehttp/guzzle",
         "version": "7.4.0"
+      },
+      {
+        "wp": "plugin",
+        "slug": "contact-form-7",
+        "version": "5.8"
+      },
+      {
+        "wp": "core",
+        "version": "6.4.3"
       }
     ],
     "allowedHosts": [
@@ -57,7 +66,8 @@
         "id": "files",
         "rpoHours": 168
       }
-    ]
+    ],
+    "inventoryMaxAgeHours": 48
   },
   {
     "id": "acme-es",
