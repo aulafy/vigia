@@ -26,7 +26,9 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 60 s | **Uptime:** HTTP status and, optionally, an expected text on the page. Needs 2 failures in a row, so one blip does not page you. | High criticality: **P1**, otherwise P2. Recovery message when the site is back. |
 | 1 h | **TLS certificate** expiry | < 3 days: **P1** · < 14 days: P2 |
 | 5 min | **DNS:** nameservers and mail servers compared with a baseline (A/AAAA if you opt in). A changed nameserver is the classic sign of a hijacked domain. | NS changed or domain does not resolve: **P1** on high criticality · MX changed: P2 |
-| 15 min | **Page content:** redirects to a foreign domain, defacement or SEO-spam text, and **new third-party scripts**, which is how card skimmers get into shops | High criticality: **P1**, otherwise P2 (new scripts: P2, or P1 with `strictScripts`) |
+| 5 min | **Email spoofing protection:** SPF and DMARC compared with a baseline, plus an audit of what is missing | Protection weakened (DMARC lowered or removed, SPF removed or `+all`): P2 · missing at onboarding: P3 |
+| 15 min | **Page content:** redirects to a foreign domain, defacement or SEO-spam text, **new third-party scripts** (the way card skimmers get into shops), **forms that submit to a new foreign domain** (phishing), new foreign iframes | Redirect, defacement or hijacked form: **P1** on high criticality · new script: P2 (P1 with `strictScripts`) · new iframe: P2 |
+| on check-in | **Backups:** each backup job reports in with a signed call; Vigía alerts when a run fails, the RPO passes without a success, the backup shrinks suddenly or a restore test is overdue | Failed or overdue: **P1** on high criticality · shrunk or no restore test: P2 |
 | 6 h | **Domain registration** through RDAP: expiry, suspension (hold, redemption), removed transfer lock, changed registrar | Expires < 7 days or suspended: **P1** · < 30 days: P2 · lock removed: P2 · registrar changed: P1 on high criticality |
 | 15 min | **[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)**: CVEs confirmed exploited in the wild, matched against the products in your inventory | High criticality: **P1**, otherwise P2 |
 | 30 min | **[OSV](https://osv.dev)**: known vulnerabilities in the exact versions of your dependencies (npm, Packagist, PyPI, Go, Maven, RubyGems, crates.io, Debian, Ubuntu, Alpine…) | In KEV, or critical on a high-criticality asset: **P1** · critical/high: P2 · other: P3 |
@@ -45,6 +47,7 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **Change alerts learn.** The first time Vigía sees a site's nameservers, registrar or third-party scripts, it saves them as the baseline. When something differs, you get an alert with an **Accept change** button. If the change was yours, one tap makes it the new baseline. A DNS change has to show up twice in a row before it alerts, so a flaky resolver does not page you.
 - **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone.
 - **The watcher is watched.** If Vigía crashes, the machine goes off or the network drops, its heartbeat stops and an external service (healthchecks.io, Better Stack…) pages you. If a vulnerability feed stops updating, you get a P2 about that blind spot.
+- **So is the alert chain.** Each channel is retried and checked for real delivery. If one fails, the others tell you. If all fail, Vigía sends `/fail` to the heartbeat service, which reaches you by email or SMS. Once a week a **canary** alert asks you to acknowledge it. If nobody does, Vigía treats the chain as broken, because "the push was sent" does not prove that anyone saw it.
 
 ## Quick start
 
@@ -106,7 +109,8 @@ The domain, DNS and content checks need nothing in `stack`, because they work fr
 | `allowedHosts` | `["stripe.com", "googletagmanager.com"]` | Foreign domains the page may redirect to or load scripts from. |
 | `strictScripts` | `true` | A new third-party script is a P1. Use it on checkout pages. |
 | `ignoreKeywords` | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
-| `skip` | `["content", "dns", "domain"]` | Turn individual checks off for this asset. |
+| `skip` | `["content", "dns", "mail", "domain"]` | Turn individual checks off for this asset. |
+| `backups` | `[{ "id": "db", "rpoHours": 24, "restoreTestDays": 30 }]` | Backup jobs that report in. See **[docs/backups.md](docs/backups.md)**. |
 
 Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented in **[docs/inventory.md](docs/inventory.md)**, along with tips for generating the inventory from lockfiles and SBOMs.
 
@@ -130,7 +134,10 @@ All settings are environment variables, which can live in `.env`:
 | `NTFY_TOPIC`, `NTFY_SERVER`, `NTFY_TOKEN` | — , `https://ntfy.sh`, — | ntfy channel |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Telegram channel |
 | `WEBHOOK_URL` | — | Generic JSON webhook |
-| `HEARTBEAT_URL` | — | Pinged every minute (dead man's switch) |
+| `HEARTBEAT_URL` | — | Pinged every minute (dead man's switch). Receives `/fail` when the alert chain is broken. |
+| `HEARTBEAT_FAIL_URL` | `HEARTBEAT_URL` + `/fail` | Failure URL, for services that use a different one |
+| `CANARY_DAYS`, `CANARY_ACK_HOURS` | `7`, `24` | Weekly test alert that must be acknowledged. `0` turns it off. |
+| `CHECKIN_SECRET` | — | Secret for signed backup check-ins |
 | `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed acknowledge links in P1 notifications |
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
 | `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`) |
@@ -146,6 +153,7 @@ All settings are environment variables, which can live in `.env`:
 | `GET /api/state` | dashboard | Inventory, status, alerts and feed timestamps as JSON |
 | `POST /api/ack?key=…` | dashboard | Acknowledge an alert. For a change alert, this also accepts the new value as the baseline. |
 | `GET/POST /api/ack?key=…&sig=…` | signed link | Acknowledge from a notification. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
+| `POST /api/backup/<asset>/<job>?status=…` | HMAC signature | Backup check-in, see [docs/backups.md](docs/backups.md#check-in-protocol) |
 | `POST /api/test` | dashboard | Send a test P1 to every channel |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
@@ -156,7 +164,7 @@ Be honest with your clients about what is covered:
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
 - **WordPress and PrestaShop plugins** are only matched by name against KEV. OSV covers them poorly. Dedicated databases such as Wordfence Intelligence or WPScan fill that gap (on the roadmap).
 - **It is not a SIEM, EDR or WAF.** Logs, file integrity, malware and intrusion detection belong to tools like Wazuh, CrowdSec or Cloudflare. Vigía complements them.
-- **It does not check backups.** Monitor them, and test a restore regularly.
+- **It only knows about backups that report in.** It cannot see inside your backup tool. A job that never calls `vigia-checkin.sh` is invisible, and a "success" is only as honest as the script that sends it. Real restore tests remain your job: Vigía only reminds you.
 - **The content check reads the HTML the server sends.** Scripts injected later by JavaScript, for example through a tag manager, or code that only shows up for some visitors (cloaking), are invisible to it. It catches the common cases, but it is not a full malware scanner.
 
 ## Development
@@ -176,7 +184,8 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 
 - WordPress plugin and theme vulnerabilities (Wordfence Intelligence / WPScan)
 - New certificates in Certificate Transparency logs (as P3)
-- SPF/DMARC audit when a client is added
+- Signed inventory push from servers (versions, lockfiles, SBOM) with a maximum age
+- Optional URL reputation through Google Web Risk
 - Importing the inventory from SBOMs (CycloneDX/SPDX) and lockfiles
 - Built-in PagerDuty Events v2 and Twilio call integrations
 - Vendor advisory RSS feeds (INCIBE-CERT, Ubuntu USN, Debian DSA)

@@ -45,7 +45,19 @@
       "googletagmanager.com",
       "stripe.com"
     ],
-    "strictScripts": true
+    "strictScripts": true,
+    "backups": [
+      {
+        "id": "db",
+        "rpoHours": 24,
+        "graceMinutes": 90,
+        "restoreTestDays": 30
+      },
+      {
+        "id": "files",
+        "rpoHours": 168
+      }
+    ]
   },
   {
     "id": "acme-es",

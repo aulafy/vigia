@@ -60,11 +60,24 @@ By default you acknowledge a P1 in the dashboard. To do it straight from the not
 2. Set `PUBLIC_URL=https://vigia.example.com`.
 3. Set `ACK_SECRET` to a random value: `openssl rand -hex 32`.
 
-P1 notifications then include an **Acknowledge** button in ntfy and a link in Telegram and the webhook. Each link is signed with HMAC-SHA256 for that alert only. It acknowledges that alert and nothing else, and it works without the dashboard password. Opening the link with GET shows a confirmation button, so Telegram previews or link scanners cannot acknowledge an alert by accident.
+P1 and P2 notifications then include an **Acknowledge** button in ntfy and a link in Telegram and the webhook. Each link is signed with HMAC-SHA256 for that alert only. It acknowledges that alert and nothing else, and it works without the dashboard password. Opening the link with GET shows a confirmation button, so Telegram previews or link scanners cannot acknowledge an alert by accident.
 
 ## Watching the watcher
 
-A monitor that dies quietly is worse than none, because you believe you are covered.
+A monitor that dies quietly is worse than none, because you believe you are covered. A monitor whose alerts never reach your phone is just as bad, and much harder to notice. Vigía checks both.
+
+### The alert chain
+
+- **Real delivery, with retries.** Each channel is tried 3 times (after 2 s and 8 s). Success means real delivery, not just an HTTP 200: ntfy must return a message id, Telegram must answer `"ok": true`, and a webhook must answer 2xx.
+- **One channel down:** a P2 goes out through the channels that still work, and it closes on its own when the channel recovers. This is a good reason to configure two channels.
+- **All channels down:** Vigía calls `HEARTBEAT_URL` + `/fail` (healthchecks.io and Better Stack both support it). The heartbeat service then alerts you by its own means, such as email, SMS or a phone call. Vigía keeps sending `/fail` instead of the normal ping every minute, and every 10 minutes it tries to deliver a "delivery restored, some alerts may have been lost" message. Once one gets through, the heartbeat goes back to normal. For a service with a different failure URL, set `HEARTBEAT_FAIL_URL`.
+- **No channel configured:** the heartbeat receives `/fail` from the start, so a forgotten `.env` cannot pass for a working setup.
+
+### The weekly canary
+
+The channels can all work and you can still miss alerts: the app was uninstalled, notifications were muted, or the phone changed. To catch that, every `CANARY_DAYS` (default 7) Vigía sends a P2 **"weekly test: please acknowledge"**. Acknowledge it from the notification or the dashboard. If nobody does within `CANARY_ACK_HOURS` (default 24), Vigía raises a P1 and reports the chain as broken to the heartbeat service. Set `CANARY_DAYS=0` to turn it off.
+
+### The process
 
 - **Heartbeat:** set `HEARTBEAT_URL` to a ping URL from [healthchecks.io](https://healthchecks.io) (free tier) or a Better Stack heartbeat, and configure that service to alert you. Vigía calls it every minute. If the process crashes, the machine powers off or the network drops, the pings stop and the external service pages you.
 - **Stale feeds:** if KEV has not updated for 1 hour, OSV for 2 hours or endoflife.date for 24 hours, Vigía raises a P2 with the last error.
@@ -72,4 +85,4 @@ A monitor that dies quietly is worse than none, because you believe you are cove
 
 ## Daily digest
 
-Every day at `DIGEST_HOUR` (time zone `DIGEST_TZ`), Vigía sends one message listing the open P2s you have not acknowledged and the P3s created in the last 24 hours. If there is nothing, it sends nothing.
+Every day at `DIGEST_HOUR` (time zone `DIGEST_TZ`), Vigía sends one message listing the open P2s you have not acknowledged and the P3s created in the last 24 hours. If there is nothing, it sends nothing. A fresh install skips its first day, so it does not open with a digest.

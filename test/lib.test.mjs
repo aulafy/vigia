@@ -166,3 +166,92 @@ test('applyAccept sets and adds baseline values', () => {
   L.applyAccept(s, { path: ['web', 'y', 'scripts'], add: 'z.io' });
   assert.deepEqual(s.web.y.scripts, ['a.io', 'z.io']);
 });
+
+test('formHosts and iframeHosts', () => {
+  const html = `<form action="/login"></form><form method=post action="https://collect.evil.io/p"></form><form></form>
+    <iframe src="https://www.youtube.com/embed/x"></iframe><iframe src="javascript:void(0)"></iframe>`;
+  assert.deepEqual(L.formHosts(html, 'https://shop.example.com/'), ['collect.evil.io', 'shop.example.com']);
+  assert.deepEqual(L.iframeHosts(html, 'https://shop.example.com/'), ['www.youtube.com']);
+});
+
+test('SPF issues', () => {
+  assert.deepEqual(L.spfIssues(['google-site-verification=x']), ['spf-missing']);
+  assert.deepEqual(L.spfIssues(['v=spf1 include:_spf.google.com ~all']), []);
+  assert.deepEqual(L.spfIssues(['v=spf1 -all']), []);
+  assert.deepEqual(L.spfIssues(['v=spf1 a mx +all']), ['spf-plusall']);
+  assert.deepEqual(L.spfIssues(['v=spf1 a mx all']), ['spf-plusall']);
+  assert.deepEqual(L.spfIssues(['v=spf1 a -all', 'v=spf1 mx -all']), ['spf-multiple']);
+  assert.deepEqual(L.spfRecords(['v=spf1 -all', 'v=spf10 x', 'other']), ['v=spf1 -all']);
+});
+
+test('DMARC parsing, issues and levels', () => {
+  assert.deepEqual(L.parseDmarc(['v=DMARC1; p=reject; rua=mailto:d@example.com']), { count: 1, p: 'reject' });
+  assert.deepEqual(L.dmarcIssues([]), ['dmarc-missing']);
+  assert.deepEqual(L.dmarcIssues(['v=DMARC1; p=none']), ['dmarc-none']);
+  assert.deepEqual(L.dmarcIssues(['v=DMARC1; p=quarantine']), []);
+  assert.deepEqual(L.dmarcIssues(['v=DMARC1; p=reject', 'v=DMARC1; p=none']), ['dmarc-multiple']);
+  assert.equal(L.dmarcLevel(['v=DMARC1; p=reject']), 2);
+  assert.equal(L.dmarcLevel([]), -1);
+});
+
+test('mail change priority: weaker is P2, the rest P3', () => {
+  assert.equal(L.mailChangePriority('DMARC', ['v=dmarc1; p=reject'], ['v=dmarc1; p=none']), 'P2');
+  assert.equal(L.mailChangePriority('DMARC', ['v=dmarc1; p=reject'], []), 'P2');
+  assert.equal(L.mailChangePriority('DMARC', ['v=dmarc1; p=none'], ['v=dmarc1; p=reject']), 'P3');
+  assert.equal(L.mailChangePriority('SPF', ['v=spf1 -all'], []), 'P2');
+  assert.equal(L.mailChangePriority('SPF', ['v=spf1 -all'], ['v=spf1 +all']), 'P2');
+  assert.equal(L.mailChangePriority('SPF', ['v=spf1 -all'], ['v=spf1 include:x -all']), 'P3');
+  assert.equal(L.mailChangePriority('SPF', [], ['v=spf1 -all']), 'P3');
+});
+
+test('deliveryOk checks real delivery per channel', () => {
+  assert.ok(L.deliveryOk('ntfy', 200, { id: 'abc', event: 'message' }));
+  assert.ok(!L.deliveryOk('ntfy', 200, null));
+  assert.ok(L.deliveryOk('telegram', 200, { ok: true }));
+  assert.ok(!L.deliveryOk('telegram', 200, { ok: false }));
+  assert.ok(!L.deliveryOk('telegram', 403, { ok: false }));
+  assert.ok(L.deliveryOk('webhook', 204, null));
+  assert.ok(!L.deliveryOk('webhook', 500, null));
+});
+
+test('retry retries, then gives up with the last error', async () => {
+  let n = 0;
+  assert.equal(await L.retry(async () => { if (++n < 3) throw new Error('x'); return 'ok'; }, [0, 0]), 'ok');
+  assert.equal(n, 3);
+  n = 0;
+  await assert.rejects(L.retry(async () => { n++; throw new Error(`fail ${n}`); }, [0, 0]), /fail 3/);
+});
+
+test('heartbeatFailUrl', () => {
+  assert.equal(L.heartbeatFailUrl('https://hc-ping.com/uuid'), 'https://hc-ping.com/uuid/fail');
+  assert.equal(L.heartbeatFailUrl('https://hc-ping.com/uuid/'), 'https://hc-ping.com/uuid/fail');
+  assert.equal(L.heartbeatFailUrl('https://x', 'https://y/fail'), 'https://y/fail');
+  assert.equal(L.heartbeatFailUrl(undefined), null);
+});
+
+test('check-in signatures: valid, tampered, expired', () => {
+  const now = Date.parse('2026-10-22T10:00:00Z'), ts = Math.floor(now / 1000), path = '/api/backup/acme/db?status=success', body = '{"bytes":10}';
+  const sig = L.signCheckin('k', ts, path, body);
+  assert.ok(L.verifyCheckin({ secret: 'k', ts, path, body, sig, now }));
+  assert.ok(L.verifyCheckin({ secret: 'k', ts: String(ts), path, body, sig: 'sha256=' + sig, now }));
+  assert.ok(!L.verifyCheckin({ secret: 'k', ts, path: '/api/backup/acme/other?status=success', body, sig, now }));
+  assert.ok(!L.verifyCheckin({ secret: 'k', ts, path, body: '{"bytes":99}', sig, now }));
+  assert.ok(!L.verifyCheckin({ secret: 'k', ts, path, body, sig, now: now + 10 * 60_000 }));
+  assert.ok(!L.verifyCheckin({ secret: undefined, ts, path, body, sig, now }));
+  assert.ok(!L.verifyCheckin({ secret: 'k', ts: 'abc', path, body, sig, now }));
+});
+
+test('backupFindings', () => {
+  const H = 3600_000, now = Date.parse('2026-10-22T10:00:00Z'), job = { rpoHours: 24, graceMinutes: 60, restoreTestDays: 30 };
+  assert.deepEqual(L.backupFindings(job, { since: now - H, lastRestoreTest: now }, now), []);
+  assert.deepEqual(L.backupFindings(job, { since: now - 26 * H, lastRestoreTest: now }, now).map(f => [f.kind, f.never]), [['overdue', true]]);
+  assert.deepEqual(L.backupFindings(job, { since: now - 99 * H, lastSuccess: now - 2 * H, lastRestoreTest: now }, now), []);
+  assert.deepEqual(L.backupFindings(job, { lastSuccess: now - 30 * H, lastRestoreTest: now }, now).map(f => f.kind), ['overdue']);
+  assert.deepEqual(L.backupFindings(job, { lastSuccess: now - 30 * H, lastFail: now - H, lastRestoreTest: now }, now).map(f => f.kind), ['failed']);
+  assert.deepEqual(L.backupFindings(job, { lastSuccess: now, lastFail: now - H, lastRestoreTest: now }, now), []);
+  assert.deepEqual(L.backupFindings(job, { since: now - 40 * 864e5, lastSuccess: now }, now).map(f => [f.kind, f.never]), [['restore', true]]);
+  const shrunk = L.backupFindings(job, { lastSuccess: now, lastRestoreTest: now, lastBytes: 100, bytesHistory: [1000, 1100, 900] }, now);
+  assert.deepEqual(shrunk.map(f => [f.kind, f.median]), [['shrunk', 1000]]);
+  assert.deepEqual(L.backupFindings(job, { lastSuccess: now, lastRestoreTest: now, lastBytes: 100, bytesHistory: [1000, 1100] }, now), []);
+  assert.deepEqual(L.backupFindings({}, { since: now - 23 * H }, now), []);
+});

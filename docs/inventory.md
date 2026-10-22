@@ -26,7 +26,8 @@ Vigía re-reads the file on every cycle. Invalid entries are skipped and reporte
 | `allowedHosts` | no | `["stripe.com"]` | Foreign domains the page may redirect to or load scripts from. Subdomains are included. |
 | `strictScripts` | no | `true` | A new third-party script becomes P1 instead of P2. |
 | `ignoreKeywords` | no | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
-| `skip` | no | `["content"]` | Checks to turn off for this asset: `domain`, `dns`, `content`. |
+| `skip` | no | `["content"]` | Checks to turn off for this asset: `domain`, `dns`, `mail`, `content`. |
+| `backups` | no | `[{ "id": "db", "rpoHours": 24 }]` | Backup jobs that report to Vigía. Fields and setup are in [backups.md](backups.md). |
 
 The legacy Spanish field names `cliente`, `criticidad` (`alta`/`media`/`baja`) and `contacto` are also accepted.
 
@@ -83,6 +84,13 @@ Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`,
 | Page redirects to a foreign domain (HTTP or meta refresh) | P1 | P2 |
 | Defacement or SEO-spam text on the page | P1 | P2 |
 | New third-party script on the page | P2 (P1 with `strictScripts`) | P2 |
+| A form now submits to a new foreign domain | P1 | P2 |
+| New foreign iframe on the page | P2 | P2 |
+| SPF or DMARC changed and protection got weaker | P2 | P2 |
+| SPF or DMARC changed otherwise | P3 | P3 |
+| SPF/DMARC missing, `+all`, `p=none` or duplicated (audit) | P3 | P3 |
+| Backup failed, or no success within the RPO | P1 | P2 |
+| Backup much smaller than usual, or restore test overdue | P2 | P2 |
 
 ## Domain, DNS and content checks
 
@@ -92,14 +100,22 @@ These three checks need no `stack` entries. They work from `domain` and `url`, a
 
 **DNS (every 5 min).** Vigía asks the public resolvers in `DNS_SERVERS` for the NS and MX records of the registrable domain and, if you add `dnsWatch`, for the A/AAAA records of the host. A difference must show up in **two consecutive checks** before it alerts. If the records return to the baseline, the alert closes.
 
-**Content (every 15 min).** Vigía downloads the page at `url` (or `https://domain`) and looks for three things:
+**Email spoofing (with the DNS check).** Vigía reads the SPF record of the registrable domain and the DMARC record at `_dmarc.<domain>`. It does two things with them:
+- An **audit** (P3, daily digest) lists what makes the domain easy to spoof: no SPF, `+all`, several SPF records, no DMARC, `p=none` or several DMARC records. Domains that send no mail need these too: `v=spf1 -all` and `p=reject` stop anyone from sending in their name.
+- A **baseline**: a change that weakens protection (DMARC lowered from `reject` to `quarantine` or `none` or removed, SPF removed or switched to `+all`) is a P2. Other changes, such as adding an include for a new mail provider, are P3. Turn the check off with `"skip": ["mail"]`.
+
+**Content (every 15 min).** Vigía downloads the page at `url` (or `https://domain`) and looks for:
 - the final URL after redirects, and any `<meta http-equiv="refresh">`, pointing to a foreign domain;
 - typical defacement and SEO-spam phrases ("hacked by", "defaced by", pharma spam, Indonesian gambling spam such as "slot gacor"), HTML comments included;
-- `<script src>` hosts that belong to another domain and were not in the baseline.
+- `<script src>` hosts that belong to another domain and were not in the baseline;
+- `<form action>` hosts that belong to another domain and were not in the baseline. A login or payment form that suddenly posts elsewhere is phishing or skimming;
+- `<iframe src>` hosts that belong to another domain and were not in the baseline.
+
+Point `url` at the page that matters most, such as `/checkout` or `/login`. Add the same site again with another `id` and `url` to watch more pages.
 
 The content check is skipped while the site is down, since the downtime alert already covers it. It only sees the HTML the server sends, not scripts injected later in the browser.
 
-**Accepting a change.** Change alerts (registrar, lock, DNS, redirect, scripts) show an **Accept change** button in the dashboard and in the phone link. Pressing it makes the new value the baseline and closes the alert. If the change was not yours, do not accept it: investigate.
+**Accepting a change.** Change alerts (registrar, lock, DNS, SPF/DMARC, redirect, scripts, forms, iframes) show an **Accept change** button in the dashboard and in the phone link. Pressing it makes the new value the baseline and closes the alert. If the change was not yours, do not accept it: investigate.
 
 On the very first run, Vigía records the whole KEV catalogue but alerts only on entries added in the last 14 days. After that, every newly added entry is checked.
 

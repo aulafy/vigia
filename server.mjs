@@ -24,19 +24,20 @@ const {
   PORT = 4848, HOST = '127.0.0.1', DASH_PASS, VIGIA_LANG = 'en',
   NTFY_TOPIC, NTFY_SERVER = 'https://ntfy.sh', NTFY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_URL,
   HEARTBEAT_URL, PUBLIC_URL, ACK_SECRET, DIGEST_HOUR = '9', DIGEST_TZ = process.env.TZ_DIGEST || 'Europe/Madrid',
-  DNS_SERVERS = '1.1.1.1,8.8.8.8',
+  DNS_SERVERS = '1.1.1.1,8.8.8.8', HEARTBEAT_FAIL_URL, CHECKIN_SECRET, CANARY_DAYS = '7', CANARY_ACK_HOURS = '24',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
 const REPEAT_P1_MS = 10 * 60_000;
-const UA = { 'user-agent': 'vigia/0.4 (+https://github.com/aulafy/vigia)' };
+const UA = { 'user-agent': 'vigia/0.5 (+https://github.com/aulafy/vigia)' };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'), INV);
 
 // domain / dns / web hold the baselines that change alerts compare against
-let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {} };
+let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
+  channels: {}, chain: null, canary: {}, backups: {} };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } catch {}
 // Atomic write: a crash mid-write cannot corrupt the state file
 const save = () => { fs.writeFileSync(STATE_F + '.tmp', JSON.stringify(state, null, 1)); fs.renameSync(STATE_F + '.tmp', STATE_F); };
@@ -63,22 +64,61 @@ async function getJSON(url, opts = {}) {
 const ackUrl = key => PUBLIC_URL && ACK_SECRET
   ? `${PUBLIC_URL.replace(/\/$/, '')}/api/ack?key=${encodeURIComponent(key)}&sig=${L.signAck(key, ACK_SECRET)}` : null;
 
+// Each channel: retried, and checked for real delivery (not just HTTP 200)
+async function deliver(name, url, payload, headers = {}) {
+  return L.retry(async () => {
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) });
+    const body = await r.json().catch(() => null);
+    if (!L.deliveryOk(name, r.status, body)) throw new Error(`${name}: HTTP ${r.status}${body?.description ? ` ${body.description}` : body?.error ? ` ${body.error}` : ''}`);
+  });
+}
+
+function channels(prio, title, body, ack) {
+  const urgent = prio === 'P1';
+  return [
+    NTFY_TOPIC && ['ntfy', () => deliver('ntfy', NTFY_SERVER, {
+      topic: NTFY_TOPIC, title: `${prio} ${title}`, message: body, priority: urgent ? 5 : 4, tags: [urgent ? 'rotating_light' : 'warning'],
+      ...(ack && { actions: [{ action: 'http', label: T.ack, url: ack, method: 'POST', clear: true }] }),
+    }, NTFY_TOKEN ? { authorization: `Bearer ${NTFY_TOKEN}` } : {})],
+    TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID && ['telegram', () => deliver('telegram', `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID, text: `${urgent ? '🚨' : '⚠️'} ${prio} ${title}\n${body}${ack ? `\n\n${T.ack}: ${ack}` : ''}`, link_preview_options: { is_disabled: true },
+    })],
+    WEBHOOK_URL && ['webhook', () => deliver('webhook', WEBHOOK_URL, { prio, title, body, key: ack ? new URL(ack).searchParams.get('key') : null, ackUrl: ack })],
+  ].filter(Boolean);
+}
+const channelCount = () => channels('P2', '', '').length;
+
+// Last resort when no channel works: tell the external heartbeat service, which alerts you by its own means
+const FAIL_URL = L.heartbeatFailUrl(HEARTBEAT_URL, HEARTBEAT_FAIL_URL);
+let lastBroken = '';
+async function failHeartbeat(reason) {
+  if (!FAIL_URL) { if (reason !== lastBroken) log('ALERT CHAIN BROKEN and no heartbeat configured:', reason); lastBroken = reason; return; }
+  await fetch(FAIL_URL, { method: 'POST', body: `Vigía: ${reason}`, signal: AbortSignal.timeout(10_000) }).catch(e => log('heartbeat /fail error:', e.message));
+}
+
 async function notify(prio, title, body, key) {
   if (prio === 'P3') return;
-  const urgent = prio === 'P1', ack = key && urgent ? ackUrl(key) : null;
+  const ack = key && key !== 'test' ? ackUrl(key) : null;
   log(`[${prio}] ${title} — ${body}`);
-  const post = (url, payload, headers = {}) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000) })
-    .then(r => { if (!r.ok) throw new Error(`${new URL(url).host} HTTP ${r.status}`); });
-  const jobs = [];
-  if (NTFY_TOPIC) jobs.push(post(NTFY_SERVER, {
-    topic: NTFY_TOPIC, title: `${prio} ${title}`, message: body, priority: urgent ? 5 : 4, tags: [urgent ? 'rotating_light' : 'warning'],
-    ...(ack && { actions: [{ action: 'http', label: T.ack, url: ack, method: 'POST', clear: true }] }),
-  }, NTFY_TOKEN ? { authorization: `Bearer ${NTFY_TOKEN}` } : {}));
-  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) jobs.push(post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    chat_id: TELEGRAM_CHAT_ID, text: `${urgent ? '🚨' : '⚠️'} ${prio} ${title}\n${body}${ack ? `\n\n${T.ack}: ${ack}` : ''}`, link_preview_options: { is_disabled: true },
-  }));
-  if (WEBHOOK_URL) jobs.push(post(WEBHOOK_URL, { prio, title, body, key, ackUrl: ack }));
-  (await Promise.allSettled(jobs)).forEach(r => r.status === 'rejected' && log('notify error:', r.reason?.message));
+  const list = channels(prio, title, body, ack);
+  if (!list.length) return;
+  const results = await Promise.allSettled(list.map(([, send]) => send()));
+  const failed = [];
+  results.forEach((r, i) => {
+    const name = list[i][0], ch = state.channels[name] ||= {};
+    if (r.status === 'fulfilled') Object.assign(ch, { ok: true, lastOk: Date.now(), err: null });
+    else { Object.assign(ch, { ok: false, lastFail: Date.now(), err: r.reason?.message }); failed.push(name); log('notify error:', r.reason?.message); }
+  });
+  if (failed.length === list.length) {
+    state.chain = { ok: false, at: Date.now(), err: failed.map(n => state.channels[n].err).join('; ') };
+    return failHeartbeat(`all alert channels failed — ${state.chain.err}`);
+  }
+  state.chain = { ok: true, at: Date.now() };
+  // channel alerts go out through the channels that still work (raise deduplicates, so no loop)
+  for (const [name] of list) {
+    if (failed.includes(name)) raise(`channel:${name}`, 'P2', T.channelDown(name), T.channelDownBody(state.channels[name].err), null);
+    else if (state.alerts[`channel:${name}`]) resolve(`channel:${name}`, T.channelOk(name));
+  }
 }
 
 // ---------- Alert lifecycle ----------
@@ -170,7 +210,7 @@ async function checkAsset(a) {
   }
   // TLS once per hour
   if (a.domain && (!st.tlsAt || Date.now() - st.tlsAt > 3600_000)) {
-    st.tlsAt = Date.now(); st.tlsDays = await tlsDays(a.domain);
+    st.tlsAt = Date.now(); st.tlsDays = (await tlsDays(a.domain)) ?? (await tlsDays(a.domain)); // one retry: a blip is not an alert
     const k = `tls:${a.id}`, p = st.tlsDays === null ? null : L.tlsPriority(st.tlsDays);
     // a site that is down already has a down: alert, do not duplicate it
     if (st.tlsDays === null) { if (st.ok) raise(k, 'P2', T.tlsUnreadable(a), T.tlsUnreadableBody(a), a.id); }
@@ -324,17 +364,41 @@ async function checkDNS(inv) {
         resolve(`dns:nx:${a.id}`, '');
       }
       if (cur === null) continue;
-      if (!base[t]) { base[t] = cur; continue; }
-      const key = `dns:${a.id}:${t}`, diff = L.diffSets(base[t], cur);
-      if (!diff.added.length && !diff.removed.length) { delete pend[t]; resolve(key, T.dnsBack(t)); continue; }
-      // a change must be seen twice in a row, so a flaky resolver does not page anyone
-      const sig = cur.join(',');
-      pend[t] = pend[t]?.sig === sig ? { sig, n: pend[t].n + 1 } : { sig, n: 1 };
-      if (pend[t].n < 2) continue;
-      raise(key, t === 'NS' ? L.downPriority(a.criticality) : 'P2', T.dnsChanged(a, name, t), T.dnsChangedBody(diff), a.id, { path: ['dns', a.id, t], set: cur });
+      compareBaseline(a, t, name, cur, prev => (t === 'NS' ? L.downPriority(a.criticality) : 'P2'));
     }
+
+    // SPF and DMARC: audit what is missing (P3) and alert when protection against spoofing gets weaker (P2)
+    if (skips(a, 'mail')) continue;
+    let spf, dmarc;
+    try {
+      spf = L.normRecords(L.spfRecords(await lookupTxt(d)));
+      dmarc = L.normRecords(L.dmarcRecords(await lookupTxt(`_dmarc.${d}`)));
+      ok++;
+    } catch (e) { failed++; lastErr = `${d} TXT: ${e.code || e.message}`; continue; }
+    const issues = [...L.spfIssues(spf), ...L.dmarcIssues(dmarc)];
+    if (issues.length) raise(`mail:audit:${a.id}`, 'P3', T.mailAudit(a, d), T.mailAuditBody(a, issues.map(T.mailIssue)), a.id);
+    else resolve(`mail:audit:${a.id}`, '', { quiet: true });
+    compareBaseline(a, 'SPF', d, spf, prev => L.mailChangePriority('SPF', prev, spf));
+    compareBaseline(a, 'DMARC', `_dmarc.${d}`, dmarc, prev => L.mailChangePriority('DMARC', prev, dmarc));
   }
   if (failed && !ok) throw new Error(lastErr);
+}
+
+// First value seen is the baseline; a different value must be seen twice in a row (a flaky resolver must not page anyone)
+function compareBaseline(a, t, name, cur, prioFor) {
+  const base = state.dns[a.id], pend = base._pending, key = `dns:${a.id}:${t}`;
+  if (!base[t]) { base[t] = cur; return; }
+  const diff = L.diffSets(base[t], cur);
+  if (!diff.added.length && !diff.removed.length) { delete pend[t]; resolve(key, T.dnsBack(t)); return; }
+  const sig = cur.join(',');
+  pend[t] = pend[t]?.sig === sig ? { sig, n: pend[t].n + 1 } : { sig, n: 1 };
+  if (pend[t].n < 2) return;
+  raise(key, prioFor(base[t]), T.dnsChanged(a, name, t), T.dnsChangedBody(diff), a.id, { path: ['dns', a.id, t], set: cur });
+}
+
+async function lookupTxt(name) {
+  try { return (await resolver.resolveTxt(name)).map(chunks => chunks.join('')); }
+  catch (e) { if (e.code === 'ENODATA' || e.code === 'ENOTFOUND') return []; throw e; }
 }
 
 // ---------- Page content: redirects, defacement, new third-party scripts (every 15 min) ----------
@@ -359,11 +423,77 @@ async function checkContent(inv) {
     if (signs.length) raise(`web:deface:${a.id}`, L.downPriority(a.criticality), T.webDeface(a), T.webDefaceBody(url, signs), a.id);
     else resolve(`web:deface:${a.id}`, T.webClean);
 
-    const ext = L.scriptHosts(html, r.url).filter(h => L.isForeign(h, site, allowed));
-    if (!base.scripts) { base.scripts = ext; continue; }
-    for (const h of ext) if (!base.scripts.includes(h))
-      raise(`web:script:${a.id}:${h}`, a.strictScripts ? 'P1' : 'P2', T.webScript(a, h), T.webScriptBody(url, h), a.id, { path: ['web', a.id, 'scripts'], add: h });
+    // Foreign hosts that scripts load from, forms submit to and iframes embed; new ones alert
+    const kinds = [
+      ['scripts', 'script', L.scriptHosts, a.strictScripts ? 'P1' : 'P2', T.webScript, T.webScriptBody],
+      ['forms', 'form', L.formHosts, L.downPriority(a.criticality), T.webForm, T.webFormBody],
+      ['iframes', 'iframe', L.iframeHosts, 'P2', T.webIframe, T.webIframeBody],
+    ];
+    for (const [field, tag, extract, prio, title, body] of kinds) {
+      const ext = extract(html, r.url).filter(h => L.isForeign(h, site, allowed));
+      if (!base[field]) { base[field] = ext; continue; } // first sighting is the baseline
+      for (const h of ext) if (!base[field].includes(h))
+        raise(`web:${tag}:${a.id}:${h}`, prio, title(a, h), body(url, h), a.id, { path: ['web', a.id, field], add: h });
+    }
   }
+}
+
+// ---------- Backups: signed check-ins from the backup jobs, judged against RPO (every 5 min and on each check-in) ----------
+const jobsOf = inv => inv.flatMap(a => (a.backups || []).filter(j => j?.id).map(j => ({ a, j, key: `${a.id}/${j.id}` })));
+const BACKUP_KINDS = ['failed', 'overdue', 'restore', 'shrunk'];
+
+async function checkBackups(inv) {
+  const now = Date.now();
+  for (const { a, j, key } of jobsOf(inv)) {
+    const rec = state.backups[key] ||= { since: now };
+    const found = L.backupFindings(j, rec, now);
+    for (const kind of BACKUP_KINDS) {
+      const k = `backup:${kind}:${key}`, f = found.find(x => x.kind === kind);
+      if (f) raise(k, kind === 'failed' || kind === 'overdue' ? j.priority || L.downPriority(a.criticality) : 'P2', T.backupTitle(kind, a, j), T.backupBody(f, a, j, rec), a.id);
+      else resolve(k, T.backupOk(j), { quiet: kind === 'restore' || kind === 'shrunk' });
+    }
+  }
+  // forget jobs removed from the inventory (paused assets keep theirs)
+  const live = new Set(jobsOf(inventory({ includePaused: true })).map(x => x.key));
+  for (const k of Object.keys(state.backups)) if (!live.has(k)) delete state.backups[k];
+}
+
+function readBody(req, max = 64 * 1024) {
+  return new Promise((res, rej) => {
+    let b = '';
+    req.on('data', d => { b += d; if (b.length > max) { rej(new Error('body too large')); req.destroy(); } });
+    req.on('end', () => res(b)).on('error', rej);
+  });
+}
+
+// POST /api/backup/<assetId>/<jobId>?status=start|success|fail|restore
+// headers: x-vigia-timestamp (unix seconds), x-vigia-signature (HMAC, see lib.signCheckin)
+// body (optional JSON): { bytes, objects, durationS, restoreTest: true | "YYYY-MM-DD", message }
+async function backupCheckin(req, u) {
+  const [, , , assetId, jobId] = u.pathname.split('/').map(decodeURIComponent);
+  const body = await readBody(req);
+  const sig = req.headers['x-vigia-signature'], path = u.pathname + u.search;
+  if (!L.verifyCheckin({ secret: CHECKIN_SECRET, ts: req.headers['x-vigia-timestamp'], path, body, sig })) return [401, { error: 'bad or expired signature' }];
+  const job = jobsOf(inventory({ includePaused: true })).find(x => x.a.id === assetId && x.j.id === jobId);
+  if (!job) return [404, { error: `unknown backup job ${assetId}/${jobId}` }];
+  const status = u.searchParams.get('status') || 'success';
+  if (!['start', 'success', 'fail', 'restore'].includes(status)) return [400, { error: 'status must be start, success, fail or restore' }];
+  let data = {};
+  try { data = body ? JSON.parse(body) : {}; } catch { return [400, { error: 'body must be JSON' }]; }
+  const rec = state.backups[job.key] ||= { since: Date.now() }, now = Date.now();
+  if (rec.lastSig === sig) return [409, { error: 'replayed check-in' }];
+  rec.lastSig = sig;
+  if (status === 'start') rec.lastStart = now;
+  if (status === 'fail') Object.assign(rec, { lastFail: now, lastMessage: String(data.message || '').slice(0, 300) });
+  if (status === 'success') {
+    rec.lastSuccess = now;
+    if (Number.isFinite(data.bytes)) { rec.bytesHistory = [...(rec.bytesHistory || []), rec.lastBytes].filter(n => n != null).slice(-10); rec.lastBytes = data.bytes; }
+    if (Number.isFinite(data.durationS)) rec.lastDurationS = data.durationS;
+  }
+  if (status === 'restore' || data.restoreTest) rec.lastRestoreTest = data.restoreTest && data.restoreTest !== true ? Date.parse(data.restoreTest) || now : now;
+  await checkBackups(inventory());
+  save();
+  return [200, { ok: true, job: job.key, status }];
 }
 
 // ---------- Scheduler ----------
@@ -386,6 +516,7 @@ setTimeout(() => every('eol', 6 * 3600_000, inv => onboard(inv, 'eol', () => che
 setTimeout(() => every('dns', 5 * 60_000, inv => onboard(inv, 'dns', () => checkDNS(inv))), 5_000);
 setTimeout(() => every('content', 15 * 60_000, inv => onboard(inv, 'web', () => checkContent(inv))), 20_000); // after the first uptime pass
 setTimeout(() => every('domain', 6 * 3600_000, inv => onboard(inv, 'domain', () => checkDomains(inv))), 40_000);
+every('backups', 5 * 60_000, checkBackups);
 
 // Watch the watcher: a feed that misses ~3 cycles is a blind spot
 const STALE = { kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000 };
@@ -398,16 +529,37 @@ every('health', 60_000, async () => {
   // Drop alerts of assets removed from the inventory
   const ids = new Set(inventory({ includePaused: true }).map(a => a.id));
   for (const a of Object.values(state.alerts)) if (a.asset && !ids.has(a.asset)) delete state.alerts[a.key];
-  // Heartbeat to an external service (healthchecks.io, Better Stack…): if Vigía dies, that service alerts you
-  if (HEARTBEAT_URL) await fetch(HEARTBEAT_URL, { signal: AbortSignal.timeout(10_000) }).catch(e => log('heartbeat error:', e.message));
+  const now = Date.now();
+  // Broken chain: retry every 10 min with a message that also tells you alerts may have been lost
+  if (state.chain?.ok === false && now - state.chain.at > 10 * 60_000) await notify('P2', T.chainRestored, T.chainRestoredBody);
+
+  // Weekly canary: proves end to end that a human receives and acknowledges alerts
+  let problem = !channelCount() ? 'no alert channel configured' : state.chain?.ok === false ? `all alert channels failed — ${state.chain.err}` : null;
+  const days = +CANARY_DAYS, ackH = +CANARY_ACK_HOURS, c = state.canary;
+  if (days > 0 && channelCount()) {
+    const open = c.key && state.alerts[c.key];
+    if (open && (open.ack || state.alerts['canary:missed']?.ack)) { delete state.alerts[c.key]; resolve('canary:missed', '', { quiet: true }); }
+    else if (open && now - c.sentAt > ackH * 3600_000) { raise('canary:missed', 'P1', T.canaryMissed, T.canaryMissedBody(ackH), null); problem ||= 'weekly test alert not acknowledged'; }
+    if (!state.alerts[c.key] && (!c.sentAt || now - c.sentAt > days * 864e5)) {
+      Object.assign(c, { key: `canary:${new Date(now).toISOString().slice(0, 10)}`, sentAt: now });
+      raise(c.key, 'P2', T.canary, T.canaryBody(ackH), null);
+    }
+  }
+
+  // Heartbeat to an external service (healthchecks.io, Better Stack…): if Vigía dies, that service alerts you.
+  // While the alert chain is broken it gets /fail instead, so it alerts you through its own channels.
+  if (problem) await failHeartbeat(problem);
+  else if (HEARTBEAT_URL) await fetch(HEARTBEAT_URL, { signal: AbortSignal.timeout(10_000) }).catch(e => log('heartbeat error:', e.message));
 });
 
 // Daily digest: new P3s + open, unacknowledged P2s
 every('digest', 5 * 60_000, async () => {
   const { day, hour } = L.localClock(DIGEST_TZ);
   if (hour < +DIGEST_HOUR || state.feeds.digestDay === day) return;
+  const firstRun = !state.feeds.digestDay;
   state.feeds.digestDay = day;
-  const since = Date.now() - 864e5, all = Object.values(state.alerts);
+  if (firstRun) return; // a fresh install does not open with a digest
+  const since = Date.now() - 864e5, all = Object.values(state.alerts).filter(a => !a.key.startsWith('canary:'));
   const p3 = all.filter(a => a.prio === 'P3' && a.first > since), p2 = all.filter(a => a.prio === 'P2' && !a.ack);
   if (!p3.length && !p2.length) return;
   const top = [...p2, ...p3].slice(0, 8).map(a => `• ${a.prio} ${a.title}`).join('\n');
@@ -435,10 +587,16 @@ http.createServer(async (req, res) => {
       <form method="post"><button style="font-size:18px;padding:12px 20px">${escHtml(T.ack)}</button></form>`);
   }
 
+  if (u.pathname.startsWith('/api/backup/') && req.method === 'POST') {
+    try { const [code, out] = await backupCheckin(req, u); return json(out, code); }
+    catch (e) { return json({ error: e.message }, 400); }
+  }
+
   if (authHeader && req.headers.authorization !== authHeader) { res.writeHead(401, { 'www-authenticate': 'Basic realm="Vigia"' }); return res.end('unauthorized'); }
 
   if (u.pathname === '/api/state') return json({
     lang: VIGIA_LANG, inventory: inventory({ includePaused: true }), status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
+    channels: state.channels, chain: state.chain, backups: Object.fromEntries(Object.entries(state.backups).map(([k, v]) => [k, { ...v, lastSig: undefined }])),
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }

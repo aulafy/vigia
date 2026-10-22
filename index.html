@@ -20,9 +20,10 @@ button,select{background:var(--card);color:var(--tx);border:1px solid var(--bd);
 <div class="chips" id="chips"></div>
 <h2 id="hAlerts"></h2><div id="alerts"></div>
 <h2 id="hAssets"></h2><div id="assets"></div>
+<h2 id="hBackups"></h2><div id="backups"></div>
 <script>
-const I={en:{accept:'Accept change',all:'All',open:'Unacknowledged',test:'Send test alert',alerts:'Active alerts',assets:'Assets',none:'No alerts. All good.',ack:'Acknowledge',acked:'acknowledged',paused:'paused',ago:'ago',never:'never',feed:'feed'},
-         es:{accept:'Aceptar cambio',all:'Todas',open:'Sin confirmar',test:'Probar aviso',alerts:'Alertas activas',assets:'Activos',none:'Sin alertas. Todo en orden.',ack:'Confirmar',acked:'confirmada',paused:'en pausa',ago:'hace',never:'nunca',feed:'feed'}};
+const I={en:{backups:'Backups',noBackups:'No backup jobs in the inventory.',lastOk:'last success',restore:'restore test',size:'size',chainDown:'ALERT CHANNELS FAILING',accept:'Accept change',all:'All',open:'Unacknowledged',test:'Send test alert',alerts:'Active alerts',assets:'Assets',none:'No alerts. All good.',ack:'Acknowledge',acked:'acknowledged',paused:'paused',ago:'ago',never:'never',feed:'feed'},
+         es:{backups:'Copias de seguridad',noBackups:'No hay tareas de copia en el inventario.',lastOk:'última correcta',restore:'prueba de restauración',size:'tamaño',chainDown:'FALLAN LOS CANALES DE AVISO',accept:'Aceptar cambio',all:'Todas',open:'Sin confirmar',test:'Probar aviso',alerts:'Alertas activas',assets:'Activos',none:'Sin alertas. Todo en orden.',ack:'Confirmar',acked:'confirmada',paused:'en pausa',ago:'hace',never:'nunca',feed:'feed'}};
 let L=I.en;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ago=t=>{if(!t)return L.never;const s=(Date.now()-t)/1000;return s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':Math.round(s/3600)+' h'};
@@ -31,7 +32,9 @@ async function load(){
   L=String(s.lang).startsWith('es')?I.es:I.en;document.documentElement.lang=s.lang;
   test.textContent=L.test;hAlerts.textContent=L.alerts;hAssets.textContent=L.assets;
   if(!f.options.length){f.innerHTML=`<option value="open">${L.open}</option><option value="all">${L.all}</option>`}
-  chips.innerHTML=Object.entries(s.notify).map(([k,v])=>`<span class="chip ${v?'on':'off'}">${v?'✓':'✗'} ${k}</span>`).join('')+
+  hBackups.textContent=L.backups;
+  chips.innerHTML=(s.chain&&s.chain.ok===false?`<span class="chip warn"><b>⚠ ${L.chainDown}</b></span>`:'')+
+    Object.entries(s.notify).map(([k,v])=>{const c=s.channels[k];const bad=v&&c&&c.ok===false;return `<span class="chip ${bad?'warn':v?'on':'off'}" title="${esc(bad?c.err:'')}">${bad?'⚠':v?'✓':'✗'} ${k}</span>`}).join('')+
     ['uptime','dns','content','kev','osv','eol','domain'].map(k=>`<span class="chip ${s.feeds[k+'Err']?'warn':''}">${k}: ${ago(s.feeds[k])}${s.feeds[k+'Err']?' ⚠':''}</span>`).join('');
   const order={P1:0,P2:1,P3:2};
   const list=s.alerts.filter(a=>f.value==='all'||!a.ack).sort((a,b)=>order[a.prio]-order[b.prio]||b.first-a.first);
@@ -40,6 +43,9 @@ async function load(){
     <div class="r">${a.ack?`<span class="mut">${L.acked}</span>`:`<button data-k="${esc(a.key)}">${a.accept?L.accept:L.ack}</button>`}</div></div>`).join('')||`<div class="mut">${L.none}</div>`;
   assets.innerHTML=s.inventory.map(a=>{const t=s.status[a.id]||{};return `<div class="card"><div class="l"><span class="dot ${a.paused?'off':t.ok===false?'bad':''}"></span><div><b>${esc(a.client)}</b> · ${esc(a.name)}${a.paused?` <span class="mut">(${L.paused})</span>`:''}<small>${esc(a.url||a.domain)} · ${a.stack.map(x=>esc(x.name||x.product)+' '+esc(x.version||'')).join(', ')}</small></div></div>
    <span class="mut r">${t.code||'-'} · ${t.ms??'-'} ms · TLS ${t.tlsDays??'-'} d · ${esc(a.criticality)}</span></div>`}).join('');
+  const kb=n=>n==null?'-':n>1e9?(n/1e9).toFixed(1)+' GB':n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1e3)+' kB';
+  const bad=new Set(s.alerts.filter(a=>a.key.startsWith('backup:')).map(a=>a.key.split(':').slice(2).join(':')));
+  backups.innerHTML=Object.entries(s.backups).map(([k,b])=>`<div class="card"><div class="l"><span class="dot ${bad.has(k)?'bad':''}"></span><div><b>${esc(k)}</b><small>${L.lastOk}: ${b.lastSuccess?ago(b.lastSuccess):L.never} · ${L.restore}: ${b.lastRestoreTest?ago(b.lastRestoreTest):L.never}</small></div></div><span class="mut r">${L.size} ${kb(b.lastBytes)}</span></div>`).join('')||`<div class="mut">${L.noBackups}</div>`;
 }
 alerts.onclick=async e=>{const k=e.target.dataset.k;if(k){await fetch('/api/ack?key='+encodeURIComponent(k),{method:'POST'});load()}};
 test.onclick=()=>fetch('/api/test',{method:'POST'});f.onchange=load;
