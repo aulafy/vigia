@@ -397,3 +397,47 @@ test('clip and kevTerm', () => {
   assert.equal(L.kevTerm({ product: 'apache', kev: ['Apache HTTP Server', 'httpd'] }), 'apache http server|httpd');
   assert.equal(L.kevTerm({ ecosystem: 'npm', name: 'x' }), '');
 });
+
+test('edge devices become stack items', () => {
+  const a = L.normalizeAsset({ id: 'net', client: 'C', edge: [{ type: 'fortigate', version: '7.2.5', management: 'https://203.0.113.10:4443', name: 'Madrid office' }, { type: 'custom-box', kev: ['acme vpn'] }] });
+  const [f, c] = a.stack;
+  assert.equal(f.edge, true); assert.equal(f.eol, 'fortios'); assert.deepEqual(f.kev, ['fortios', 'fortiproxy']); assert.equal(f.name, 'Madrid office');
+  assert.deepEqual(c.kev, ['acme vpn']); assert.deepEqual(c.feeds, ['incibe']);
+  assert.ok(L.kevMatches({ vendorProject: 'Fortinet', product: 'FortiOS' }, f));
+  const { assets, errors } = L.loadInventory([{ id: 'only-edge', edge: [{ type: 'paloalto' }] }, { id: 'bad', edge: [{}] }]);
+  assert.deepEqual(assets.map(x => x.id), ['only-edge', 'bad']);
+  assert.deepEqual(errors, ['bad: edge[0] needs a "type"']);
+});
+
+const RSS = `<rss><channel>
+<item><title>CVE-2026-0322 PAN-OS: Authenticated Remote Code Execution (RCE) in the Management Interface (Severity: HIGH)</title><pubDate>2026-10-15T18:30:00.000Z</pubDate><link>https://security.paloaltonetworks.com/CVE-2026-0322</link><guid>https://security.paloaltonetworks.com/CVE-2026-0322</guid></item>
+<item><title>Impact of PHP vulnerabilities on Palo Alto Networks products</title><description><![CDATA[<p>CVE-2026-109618 affects Prisma Cloud</p>]]></description><link>https://x/php</link></item>
+<item><title>Heap overflow in FortiOS SSL-VPN</title><description>&lt;p&gt;&lt;strong&gt;CVSSv3 Score:&lt;/strong&gt; 9.8&lt;/p&gt; This vulnerability is being exploited in the wild.</description><link>https://fortiguard.fortinet.com/psirt/FG-IR-1</link></item>
+</channel></rss>`;
+
+test('parseFeed, advisoryMatches and advisorySeverity', () => {
+  const items = L.parseFeed(RSS);
+  assert.equal(items.length, 3);
+  assert.deepEqual(items[0].cves, ['CVE-2026-0322']);
+  assert.equal(items[0].date, Date.parse('2026-10-15T18:30:00.000Z'));
+  assert.match(items[2].text, /CVSSv3 Score: 9\.8/);
+  const pa = L.edgeItem({ type: 'paloalto' }, 0), fg = L.edgeItem({ type: 'fortigate' }, 1);
+  assert.deepEqual(items.map(i => L.advisoryMatches(i, pa)), [true, false, false]); // the PHP bulletin is not about PAN-OS
+  assert.deepEqual(items.map(i => L.advisoryMatches(i, fg)), [false, false, true]);
+  assert.deepEqual(L.advisorySeverity(items[0]), { prio: 'P2', exploited: false });
+  assert.deepEqual(L.advisorySeverity(items[2]), { prio: 'P1', exploited: true });
+  assert.deepEqual(L.advisorySeverity({ title: 'GUI denial of service (Severity: LOW)', text: '' }), { prio: 'P3', exploited: false });
+  assert.deepEqual(L.advisorySeverity({ title: 'Vulnerabilidad crítica en SonicOS', text: 'explotada activamente' }), { prio: 'P1', exploited: true });
+  assert.equal(L.htmlText('&lt;b&gt;A&amp;amp;B&lt;/b&gt; &#233;'), 'A&B é');
+});
+
+test('EPSS parsing and escalation', () => {
+  const e = L.parseEpss({ data: [{ cve: 'CVE-1', epss: '0.97', percentile: '0.999' }] });
+  assert.deepEqual(e, { 'CVE-1': { epss: 0.97, pct: 0.999 } });
+  assert.equal(L.epssPriority('P2', 0.6), 'P1');
+  assert.equal(L.epssPriority('P3', 0.2), 'P2');
+  assert.equal(L.epssPriority('P3', 0.05), 'P3');
+  assert.equal(L.epssPriority('P1', 0.01), 'P1'); // never lowers
+  assert.equal(L.epssPriority('P2', 0.2, { p1: 0.15, p2: 0.05 }), 'P1');
+  assert.deepEqual(L.cvesIn('fix CVE-2026-0322 and cve-2024-3400, again CVE-2026-0322'), ['CVE-2026-0322', 'CVE-2024-3400']);
+});

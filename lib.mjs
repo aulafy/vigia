@@ -3,6 +3,38 @@ import crypto from 'node:crypto';
 
 const LEVELS = { alta: 'high', media: 'medium', baja: 'low' };
 
+// ---------- Edge devices (firewalls, VPN gateways, remote access) ----------
+// The front door of most small-business breaches. `kev`: phrases matched against CISA KEV; `adv`: phrases matched
+// against vendor advisories; `feeds`: which advisory feeds can mention it; `eol`: endoflife.date id.
+export const EDGE = {
+  fortigate: { label: 'FortiGate (FortiOS)', kev: ['fortios', 'fortiproxy'], adv: ['fortios', 'fortigate', 'fortiproxy', 'ssl-vpn', 'ssl vpn'], feeds: ['fortinet', 'incibe'], eol: 'fortios' },
+  paloalto: { label: 'Palo Alto (PAN-OS / GlobalProtect)', kev: ['pan-os', 'globalprotect'], adv: ['pan-os', 'globalprotect gateway', 'globalprotect portal'], feeds: ['paloalto', 'incibe'], eol: 'panos' },
+  'cisco-asa': { label: 'Cisco ASA / Firepower', kev: ['adaptive security appliance', 'firepower threat defense'], adv: ['adaptive security appliance', 'firepower threat defense', 'secure firewall asa'], feeds: ['cisco', 'incibe'] },
+  'cisco-iosxe': { label: 'Cisco IOS XE', kev: ['ios xe'], adv: ['ios xe'], feeds: ['cisco', 'incibe'], eol: 'cisco-ios-xe' },
+  ivanti: { label: 'Ivanti Connect Secure', kev: ['connect secure', 'policy secure'], adv: ['connect secure', 'policy secure'], feeds: ['incibe'] },
+  netscaler: { label: 'Citrix NetScaler ADC / Gateway', kev: ['netscaler', 'citrix adc', 'citrix gateway'], adv: ['netscaler', 'citrix adc', 'citrix gateway'], feeds: ['incibe'] },
+  sonicwall: { label: 'SonicWall (SonicOS / SMA)', kev: ['sonicos', 'sma100', 'secure mobile access'], adv: ['sonicwall', 'sonicos'], feeds: ['incibe'] },
+  sophos: { label: 'Sophos Firewall', kev: ['sophos firewall', 'xg firewall'], adv: ['sophos firewall'], feeds: ['incibe'] },
+  checkpoint: { label: 'Check Point Quantum', kev: ['quantum security gateway', 'check point security gateway'], adv: ['check point'], feeds: ['incibe'] },
+  watchguard: { label: 'WatchGuard Firebox', kev: ['fireware'], adv: ['watchguard', 'fireware'], feeds: ['incibe'] },
+  zyxel: { label: 'Zyxel firewall / VPN', kev: ['zyxel'], adv: ['zyxel'], feeds: ['incibe'] },
+  mikrotik: { label: 'MikroTik RouterOS', kev: ['routeros'], adv: ['mikrotik', 'routeros'], feeds: ['incibe'], eol: 'routeros' },
+  beyondtrust: { label: 'BeyondTrust Remote Support', kev: ['remote support', 'privileged remote access'], adv: ['beyondtrust'], feeds: ['incibe'] },
+  screenconnect: { label: 'ConnectWise ScreenConnect', kev: ['screenconnect'], adv: ['screenconnect'], feeds: ['incibe'] },
+  opnsense: { label: 'OPNsense', kev: ['opnsense'], adv: ['opnsense'], feeds: ['incibe'], eol: 'opnsense' },
+};
+
+// A declared device becomes a stack item, so KEV and end-of-life checks cover it like any other software.
+// Unknown types work too when they bring their own `kev` / `adv` phrases.
+export function edgeItem(d, i) {
+  const c = EDGE[String(d.type || '').toLowerCase()] || {};
+  return {
+    edge: true, edgeIndex: i, type: d.type, name: d.name || c.label || d.type, product: c.label || d.type, version: d.version ? String(d.version) : undefined,
+    kev: d.kev || c.kev || [d.type], adv: d.adv || c.adv || [d.type], feeds: d.feeds || c.feeds || ['incibe'], ...(c.eol && d.version && { eol: c.eol }),
+    portal: d.portal, management: d.management,
+  };
+}
+
 // Accepts the English field names and the legacy Spanish ones (cliente, criticidad, contacto).
 export function normalizeAsset(raw) {
   const a = { ...raw };
@@ -10,6 +42,8 @@ export function normalizeAsset(raw) {
   a.contact ??= raw.contacto;
   a.criticality = LEVELS[a.criticality ?? raw.criticidad] || a.criticality || raw.criticidad || 'medium';
   a.stack = Array.isArray(a.stack) ? a.stack : [];
+  a.edge = Array.isArray(a.edge) ? a.edge : [];
+  if (a.edge.length) a.stack = [...a.stack, ...a.edge.map(edgeItem)];
   return a;
 }
 
@@ -20,7 +54,8 @@ export function loadInventory(list) {
     const a = normalizeAsset(raw || {});
     if (!a.id) return errors.push(`#${i}: missing "id"`);
     if (ids.has(a.id)) return errors.push(`${a.id}: duplicate id`);
-    if (!a.url && !a.domain) return errors.push(`${a.id}: needs "url" or "domain"`);
+    if (!a.url && !a.domain && !a.edge.length) return errors.push(`${a.id}: needs "url", "domain" or "edge" devices`);
+    a.edge.forEach((d, j) => { if (!d?.type) errors.push(`${a.id}: edge[${j}] needs a "type"`); });
     if (!['high', 'medium', 'low'].includes(a.criticality)) errors.push(`${a.id}: criticality must be high, medium or low`);
     ids.add(a.id);
     assets.push(a);
@@ -421,6 +456,50 @@ export function inventoryStale(asset, rec, now = Date.now()) {
   if (!maxH) return null;
   const ref = rec?.at || rec?.since || now, hours = Math.floor((now - ref) / 3600_000);
   return now - ref > maxH * 3600_000 ? { hours, never: !rec?.at, maxH } : null;
+}
+
+// ---------- Vendor advisories (RSS) ----------
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const decode = s => s.replace(/&(#x[\da-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#'
+  ? String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENTITIES[e.toLowerCase()] ?? m);
+export const htmlText = s => decode(decode(String(s || '')).replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+// Minimal RSS/Atom reader: enough for vendor PSIRT feeds, no XML library
+export function parseFeed(xml) {
+  const items = [];
+  for (const [, block] of String(xml).matchAll(/<(?:item|entry)\b[^>]*>([\s\S]*?)<\/(?:item|entry)>/gi)) {
+    const tag = t => block.match(new RegExp(`<${t}\\b[^>]*>([\\s\\S]*?)</${t}>`, 'i'))?.[1] ?? '';
+    const link = htmlText(tag('link')) || block.match(/<link\b[^>]*href="([^"]+)"/i)?.[1] || '';
+    const title = htmlText(tag('title')), text = htmlText(tag('description') || tag('summary') || tag('content'));
+    const date = Date.parse(htmlText(tag('pubDate') || tag('updated') || tag('published')));
+    items.push({ id: htmlText(tag('guid') || tag('id')) || link || title, title, link: link.trim(), text: text.slice(0, 4000), date: Number.isNaN(date) ? null : date, cves: cvesIn(`${title} ${text}`) });
+  }
+  return items;
+}
+
+export const cvesIn = text => [...new Set(String(text).toUpperCase().match(/CVE-\d{4}-\d{4,}/g) || [])];
+
+const phraseRe = p => new RegExp(`(^|[^a-z0-9])${reEscape(String(p).toLowerCase())}($|[^a-z0-9])`);
+// Does this advisory concern this device? Product phrases only: "Fortinet" alone would match every PHP or OpenSSL bulletin
+export const advisoryMatches = (item, device) => { const hay = `${item.title} ${item.text}`.toLowerCase(); return (device.adv || []).some(p => phraseRe(p).test(hay)); };
+
+// Exploited in the wild beats everything; then the vendor's own severity
+export function advisorySeverity(item) {
+  const t = `${item.title} ${item.text}`;
+  if (/\b(actively exploited|exploited in the wild|in the wild|under active exploitation|known exploited|explotad[ao]s? activamente|explotaci[oó]n activa)\b/i.test(t)) return { prio: 'P1', exploited: true };
+  // on an edge device, "high" from the vendor is already worth a push: these are the boxes attackers scan for
+  if (/\bseverity:?\s*(critical|high)\b|\b(critical|cr[ií]tic[ao]s?)\b|cvss(v3|v4)?( base)? score:? *([7-9]|10)(\.\d)?\b/i.test(t)) return { prio: 'P2', exploited: false };
+  return { prio: 'P3', exploited: false };
+}
+
+// ---------- EPSS (FIRST): probability of exploitation in the next 30 days ----------
+export const parseEpss = j => Object.fromEntries((j?.data || []).map(d => [d.cve, { epss: +d.epss, pct: +d.percentile }]));
+
+// Raise the priority of an alert whose CVEs are likely to be exploited soon (never lowers it)
+export function epssPriority(prio, epss, { p1 = 0.5, p2 = 0.1 } = {}) {
+  if (epss >= p1 && prio !== 'P1') return 'P1';
+  if (epss >= p2 && prio === 'P3') return 'P2';
+  return prio;
 }
 
 // ---------- Plumbing ----------

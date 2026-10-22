@@ -33,6 +33,8 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 6 h | **Domain registration** through RDAP: expiry, suspension (hold, redemption), removed transfer lock, changed registrar | Expires < 7 days or suspended: **P1** · < 30 days: P2 · lock removed: P2 · registrar changed: P1 on high criticality |
 | 15 min | **[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)**: CVEs confirmed exploited in the wild, matched against the products in your inventory | High criticality: **P1**, otherwise P2 |
 | 30 min | **[OSV](https://osv.dev)**: known vulnerabilities in the exact versions of your dependencies (npm, Packagist, PyPI, Go, Maven, RubyGems, crates.io, Debian, Ubuntu, Alpine…) | In KEV, or critical on a high-criticality asset: **P1** · critical/high: P2 · other: P3 |
+| 15 min | **Firewalls, VPN and remote access** you declare (FortiGate, Palo Alto, Cisco ASA, Ivanti, NetScaler, SonicWall, BeyondTrust…): CISA KEV, vendor advisories (Fortinet, Palo Alto and Cisco PSIRT, INCIBE-CERT), administration interface reachable from the Internet, portal certificate | KEV or exploited advisory: **P1** · critical/high advisory: P2 · exposed management: P2 |
+| 2 h | **EPSS early warning**: probability of exploitation in the next 30 days for the CVEs in your open alerts | ≥ 50 %: raised to **P1** · ≥ 10 %: P3 raised to P2 |
 | 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
 | on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
@@ -49,6 +51,7 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **Alerts deduplicate and close themselves.** A finding is reported once. Once you upgrade the dependency, the next scan closes the alert.
 - **Change alerts learn.** The first time Vigía sees a site's nameservers, registrar or third-party scripts, it saves them as the baseline. When something differs, you get an alert with an **Accept change** button. If the change was yours, one tap makes it the new baseline. A DNS change has to show up twice in a row before it alerts, so a flaky resolver does not page you.
 - **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone.
+- **The front door first.** The firewall or VPN gateway is where most small-business breaches start, so for declared edge devices a KEV match is always P1 and vendor advisories arrive before KEV catches up. See [docs/edge.md](docs/edge.md).
 - **Bursts are grouped.** When one check produces more than 3 messages at once, for example 30 sites on the same server going down, you get one summary instead of 30 pages. If Vigía's own connection drops, it notices and skips the uptime round instead of reporting every site as down.
 - **The watcher is watched.** If Vigía crashes, the machine goes off or the network drops, its heartbeat stops and an external service (healthchecks.io, Better Stack…) pages you. If a vulnerability feed stops updating, you get a P2 about that blind spot.
 - **So is the alert chain.** Each channel is retried and checked for real delivery. If one fails, the others tell you. If all fail, Vigía sends `/fail` to the heartbeat service, which reaches you by email or SMS. Once a week a **canary** alert asks you to acknowledge it. If nobody does, Vigía treats the chain as broken, because "the push was sent" does not prove that anyone saw it.
@@ -116,9 +119,14 @@ The domain, DNS and content checks need nothing in `stack`, because they work fr
 | `ignoreKeywords` | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
 | `skip` | `["content", "dns", "mail", "domain"]` | Turn individual checks off for this asset. |
 | `backups` | `[{ "id": "db", "rpoHours": 24, "restoreTestDays": 30 }]` | Backup jobs that report in. See **[docs/backups.md](docs/backups.md)**. |
+| `edge` | `[{ "type": "fortigate", "version": "7.2.5", "management": "https://203.0.113.10:4443" }]` | Firewalls, VPN and remote-access devices. See **[docs/edge.md](docs/edge.md)**. |
 | `inventoryMaxAgeHours` | `24` | Expect a pushed inventory at least this often (default 48 h once the asset has pushed). |
 
 Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented in **[docs/inventory.md](docs/inventory.md)**, along with tips for generating the inventory from lockfiles and SBOMs.
+
+## Monthly client reports
+
+One printable page per client and month: availability, incidents, response times, backups, edge devices and recommended actions. Open it from the dashboard, or let Vigía write all of them when the month ends. See **[docs/reports.md](docs/reports.md)**.
 
 ## Alert channels
 
@@ -150,6 +158,9 @@ All settings are environment variables, which can live in `.env`:
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
 | `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`) |
 | `DIGEST_HOUR`, `DIGEST_TZ` | `9`, `Europe/Madrid` | When to send the daily digest |
+| `EPSS_P1`, `EPSS_P2` | `0.5`, `0.1` | EPSS thresholds for escalating alerts |
+| `ADVISORY_FEED_URLS` | — | `name=url,…` to replace or add advisory feeds |
+| `REPORT_BRAND` | — | Your company name on client reports |
 | `CONNECTIVITY_URLS` | Cloudflare trace, `1.1.1.1` | Probed before each uptime round. If none answers, Vigía is the one offline: the round is skipped instead of paging for every site. |
 | `CHECKIN_ALLOW_MASTER` | `true` | Set to `false` once every server uses its own key (`node server.mjs key <asset>`) |
 | `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
@@ -166,6 +177,7 @@ All settings are environment variables, which can live in `.env`:
 | `GET/POST /api/ack?key=…&sig=…` | signed link | Acknowledge from a notification. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
 | `POST /api/backup/<asset>/<job>?status=…` | HMAC signature | Backup check-in, see [docs/backups.md](docs/backups.md#check-in-protocol) |
 | `POST /api/inventory/<asset>` | HMAC signature | Inventory push, see [docs/inventory-push.md](docs/inventory-push.md#protocol) |
+| `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
 | `POST /api/test` | dashboard | Send a test P1 to every channel |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
@@ -197,6 +209,8 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 - New certificates in Certificate Transparency logs (as P3)
 - Windows collector (PowerShell) and PrestaShop/Drupal module feeds
 - Optional URL reputation through Google Web Risk
+- More vendor PSIRT feeds (SonicWall, Ivanti and Citrix publish no usable RSS today; INCIBE-CERT covers them)
+- Report delivery by email
 - Importing the inventory from SBOMs (CycloneDX/SPDX) and lockfiles
 - Built-in PagerDuty Events v2 and Twilio call integrations
 - Vendor advisory RSS feeds (INCIBE-CERT, Ubuntu USN, Debian DSA)
@@ -204,7 +218,7 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 
 ## Data sources
 
-CISA KEV (public domain), OSV.dev (each record under its source's licence), endoflife.date (MIT), IANA RDAP bootstrap, and Wordfence Intelligence (free for personal and commercial use under Wordfence's terms, cited as the source in every WordPress alert).
+CISA KEV (public domain), FIRST EPSS, vendor PSIRT feeds (Fortinet, Palo Alto Networks, Cisco), INCIBE-CERT, OSV.dev (each record under its source's licence), endoflife.date (MIT), IANA RDAP bootstrap, and Wordfence Intelligence (free for personal and commercial use under Wordfence's terms, cited as the source in every WordPress alert).
 
 ## License
 

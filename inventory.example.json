@@ -82,6 +82,21 @@
     "stack": []
   },
   {
+    "id": "acme-net",
+    "client": "ACME Ltd",
+    "name": "Office network",
+    "criticality": "high",
+    "edge": [
+      {
+        "type": "fortigate",
+        "name": "Madrid FortiGate",
+        "version": "7.2.5",
+        "portal": "https://vpn.example.com",
+        "management": "https://203.0.113.10:4443"
+      }
+    ]
+  },
+  {
     "id": "acme-blog",
     "client": "ACME Ltd",
     "name": "Corporate blog",

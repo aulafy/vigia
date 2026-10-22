@@ -28,6 +28,7 @@ Vigía re-reads the file on every cycle. Invalid entries are skipped and reporte
 | `ignoreKeywords` | no | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
 | `skip` | no | `["content"]` | Checks to turn off for this asset: `domain`, `dns`, `mail`, `content`. |
 | `inventoryMaxAgeHours` | no | `24` | Expect a pushed inventory at least this often (see [inventory-push.md](inventory-push.md#freshness)). |
+| `edge` | no | `[{ "type": "fortigate", "version": "7.2.5" }]` | Firewalls, VPN and remote-access devices (see [edge.md](edge.md)). An asset may have only `edge` devices and no `url`/`domain`. |
 | `backups` | no | `[{ "id": "db", "rpoHours": 24 }]` | Backup jobs that report to Vigía. Fields and setup are in [backups.md](backups.md). |
 
 The legacy Spanish field names `cliente`, `criticidad` (`alta`/`media`/`baja`) and `contacto` are also accepted.
@@ -103,6 +104,11 @@ Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`,
 | WordPress: CVSS ≥ 7 | P2 | P2 |
 | WordPress: lower or unscored | P3 | P3 |
 | Pushed inventory older than its window | P2 | P2 |
+| Edge device: product in CISA KEV | P1 | P1 |
+| Edge device: vendor advisory, exploited in the wild | P1 | P1 |
+| Edge device: vendor advisory, critical or high | P2 | P2 |
+| Edge device: management interface reachable from the Internet | P2 | P2 |
+| Any vulnerability alert whose CVE has EPSS ≥ 50 % | P1 | P1 |
 
 ## Domain, DNS and content checks
 

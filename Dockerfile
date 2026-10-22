@@ -1,6 +1,6 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY server.mjs lib.mjs i18n.mjs index.html inventory.example.json ./
+COPY server.mjs lib.mjs i18n.mjs report.mjs index.html inventory.example.json ./
 RUN mkdir -p data && chown node:node data
 ENV HOST=0.0.0.0 PORT=4848
 USER node

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — 2026-10-22
+
+### Added
+- **Edge devices** (`edge` on any asset: FortiGate, Palo Alto, Cisco ASA/IOS XE, Ivanti, NetScaler, SonicWall, Sophos, Check Point, WatchGuard, Zyxel, MikroTik, BeyondTrust, ScreenConnect, OPNsense, or custom). For each one: CISA KEV (always P1), vendor advisories, end-of-life firmware, whether the declared **management** address is reachable from the Internet (P2), and the **portal** certificate, self-signed included. Assets can be made of edge devices only.
+- **Vendor advisories:** Fortinet, Palo Alto and Cisco PSIRT RSS plus INCIBE-CERT, matched by product (not vendor) and deduplicated by CVE across feeds. Exploited in the wild is P1, critical/high is P2. `ADVISORY_FEED_URLS` replaces or adds feeds.
+- **EPSS early warning:** every 2 h, open vulnerability alerts with EPSS ≥ `EPSS_P1` (0.5) are raised to P1 and their acknowledgement is reset, and P3s with EPSS ≥ `EPSS_P2` (0.1) become P2.
+- **Monthly client reports:** a printable HTML page per client and month (availability, incidents, MTTA/MTTR, recommended actions, sites, edge devices, backups, history), via `/report`, the dashboard, `node server.mjs report`, and written automatically to `data/reports/` when a month ends. Alert history and monthly availability are now recorded.
+- KEV alerts link the vendor advisory from the KEV notes.
+
 ## 0.6.1 — 2026-10-22 (code review)
 
 ### Fixed: silent failures

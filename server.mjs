@@ -3,6 +3,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import tls from 'node:tls';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Resolver } from 'node:dns/promises';
@@ -10,6 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import crypto from 'node:crypto';
 import * as L from './lib.mjs';
 import { messages } from './i18n.mjs';
+import { renderReport, previousMonth, monthRange } from './report.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(DIR, 'data');
@@ -28,13 +30,14 @@ const {
   HEARTBEAT_URL, PUBLIC_URL, ACK_SECRET, DIGEST_HOUR = '9', DIGEST_TZ = process.env.TZ_DIGEST || 'Europe/Madrid',
   DNS_SERVERS = '1.1.1.1,8.8.8.8', HEARTBEAT_FAIL_URL, CHECKIN_SECRET, CANARY_DAYS = '7', CANARY_ACK_HOURS = '24',
   CONNECTIVITY_URLS = 'https://www.cloudflare.com/cdn-cgi/trace,https://1.1.1.1/', CHECKIN_ALLOW_MASTER = 'true', DASH_HOSTS = '',
+  EPSS_P1 = '0.5', EPSS_P2 = '0.1', EPSS_URL = 'https://api.first.org/data/v1/epss', ADVISORY_FEED_URLS = '', REPORT_BRAND = '',
   WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
 const REPEAT_P1_MS = 10 * 60_000;
-const UA = { 'user-agent': 'vigia/0.6 (+https://github.com/aulafy/vigia)' };
+const UA = { 'user-agent': 'vigia/0.7 (+https://github.com/aulafy/vigia)' };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const START = Date.now();
 
@@ -49,7 +52,7 @@ if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'
 
 // domain / dns / web hold the baselines that change alerts compare against
 let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
-  channels: {}, chain: null, canary: {}, backups: {} };
+  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {} };
 if (fs.existsSync(STATE_F)) {
   try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; }
   catch (e) {
@@ -175,6 +178,11 @@ function flush(name, q) {
   notify(real.some(x => x.prio === 'P1') ? 'P1' : 'P2', T.burst(real.length, name), top + (real.length > 8 ? `\n${T.more}` : ''));
 }
 
+// ---------- History (for the monthly report) ----------
+const monthOf = (t = Date.now()) => L.localClock(DIGEST_TZ, new Date(t)).day.slice(0, 7);
+const histOf = a => { for (let i = state.history.length - 1; i >= 0; i--) { const h = state.history[i]; if (h.key === a.key && h.first === a.first) return h; } return null; };
+function histNote(a, fields) { const h = histOf(a); if (h) Object.assign(h, fields); }
+
 // ---------- Alert lifecycle ----------
 // Assets in their first scan of a given kind: findings are stored silently and summarised in one message.
 const onboarding = {}; // kind -> Set(assetId)
@@ -187,6 +195,7 @@ function raise(key, prio, title, body, asset, accept) {
   if (accept) body = `${body} ${T.acceptHint}`;
   if (!a) {
     state.alerts[key] = { key, prio, title, body, asset, first: now, sentAt: now, ack: false, ...(accept && { accept }) };
+    state.history.push({ key, prio, title, asset, first: now });
     if (inOnboarding(key, asset)) state.alerts[key].ack = prio !== 'P1'; // P1s still ring
     else send(prio, title, body, key);
   } else Object.assign(a, { title, body }, accept && { accept });
@@ -195,8 +204,9 @@ function raise(key, prio, title, body, asset, accept) {
 function ackAlert(key) {
   const a = state.alerts[key];
   if (!a) return;
+  histNote(a, { ackAt: a.ackAt || Date.now(), ...(a.accept && { resolvedAt: Date.now(), accepted: true }) });
   if (a.accept) { L.applyAccept(state, a.accept); delete state.alerts[key]; }
-  else a.ack = true;
+  else { a.ack = true; a.ackAt ||= Date.now(); }
   save();
 }
 
@@ -204,6 +214,7 @@ function resolve(key, msg, { quiet = false } = {}) {
   const a = state.alerts[key];
   if (!a) return;
   delete state.alerts[key];
+  histNote(a, { resolvedAt: Date.now() });
   if (!quiet && a.prio !== 'P3') send('P2', T.recovered(a.title), msg || '');
 }
 
@@ -253,6 +264,8 @@ async function checkAsset(a) {
     if (!ok && !why) why = `HTTP ${code}`;
   } catch (e) { why = e.cause?.code || e.name || e.message; }
   Object.assign(st, { ms: Date.now() - t0, code, checkedAt: Date.now() });
+  const av = ((state.avail[a.id] ||= {})[monthOf()] ||= [0, 0]);
+  av[0]++; if (ok) av[1]++;
   const key = `down:${a.id}`;
   if (ok) { st.fails = 0; st.ok = true; resolve(key, T.up(a, st.ms)); }
   else {
@@ -277,7 +290,8 @@ async function checkKEV(inv) {
   const j = await getJSON('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json');
   kevSet = new Set(j.vulnerabilities.map(v => v.cveID));
   const seen = new Set(state.kev.seen), first = !state.kev.seeded, checked = state.kev.checked || {};
-  const hit = (v, a, s) => raise(`kev:${v.cveID}:${a.id}`, L.kevPriority(a.criticality), T.kev(v), T.kevBody(a, s, v), a.id);
+  const hit = (v, a, s) => raise(`kev:${v.cveID}:${a.id}`, s.edge ? 'P1' : L.kevPriority(a.criticality), T.kev(v),
+    `${T.kevBody(a, s, v)}${(v.notes || '').match(/https?:\/\/[^\s;]+/)?.[0] ? ` ${(v.notes || '').match(/https?:\/\/[^\s;]+/)[0]}` : ''}`, a.id);
   // 1. entries added since the last run, against every asset
   for (const v of j.vulnerabilities) {
     if (seen.has(v.cveID)) continue;
@@ -381,6 +395,100 @@ async function checkWordPress(inv) {
     raise(key, L.wpPriority({ score: v.score, title: v.title, inKev, criticality: a.criticality }), T.wp(a, it, v, inKev), T.wpBody(a, it, v), a.id);
   }
   prune('wp', new Set(users.map(a => a.id)), found, T.wpFixed);
+}
+
+// ---------- Edge devices (every 15 min): vendor advisories, exposed management interface, portal certificate ----------
+const FEEDS = {
+  fortinet: 'https://filestore.fortinet.com/fortiguard/rss/ir.xml',
+  paloalto: 'https://security.paloaltonetworks.com/rss.xml',
+  cisco: 'https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml',
+  incibe: 'https://www.incibe.es/incibe-cert/alerta-temprana/avisos/feed',
+  // "name=url,name=url" replaces or adds feeds (mirrors, or another CERT)
+  ...Object.fromEntries(ADVISORY_FEED_URLS.split(',').map(x => x.trim().split(/=(.*)/s)).filter(([k, v]) => k && v)),
+};
+const shortHash = x => crypto.createHash('sha1').update(String(x)).digest('hex').slice(0, 12);
+
+// Reachability only: does anything complete a TCP (and for https, TLS) handshake at the address you declared?
+function reachable(url, timeout = 8000) {
+  return new Promise(res => {
+    let u; try { u = new URL(url); } catch { return res(false); }
+    const port = +u.port || (u.protocol === 'https:' ? 443 : 80), host = u.hostname.replace(/^\[|\]$/g, '');
+    const opts = { host, port, timeout, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false };
+    const s = u.protocol === 'https:' ? tls.connect(opts, () => { s.destroy(); res(true); }) : net.connect(opts, () => { s.destroy(); res(true); });
+    s.on('error', () => res(false)); s.on('timeout', () => { s.destroy(); res(false); });
+  });
+}
+// Certificate expiry even for self-signed portals (common on VPN gateways)
+const certDays = url => new Promise(res => {
+  let u; try { u = new URL(url); } catch { return res(null); }
+  const s = tls.connect({ host: u.hostname, port: +u.port || 443, servername: net.isIP(u.hostname) ? undefined : u.hostname, rejectUnauthorized: false, timeout: 8000 }, () => {
+    const c = s.getPeerCertificate(); s.destroy(); res(c?.valid_to ? Math.floor((new Date(c.valid_to) - Date.now()) / 864e5) : null);
+  });
+  s.on('error', () => res(null)); s.on('timeout', () => { s.destroy(); res(null); });
+});
+
+async function checkEdge(inv) {
+  const devices = inv.flatMap(a => a.stack.filter(s => s.edge).map(s => ({ a, s, dev: `${a.id}:${s.edgeIndex}` })));
+  if (!devices.length) return;
+  // only the feeds some device needs; one failing feed does not stop the others
+  const needed = [...new Set(devices.flatMap(d => d.s.feeds))].filter(f => FEEDS[f]), items = {};
+  const errs = [];
+  await L.pool(needed, 4, async f => {
+    try { const r = await fetch(FEEDS[f], { headers: UA, signal: AbortSignal.timeout(30_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); items[f] = L.parseFeed(await r.text()); }
+    catch (e) { errs.push(`${f}: ${e.message}`); }
+  });
+  if (needed.length && errs.length === needed.length) throw new Error(`no advisory feed reachable — ${errs.join('; ')}`);
+  state.feeds.edgePartialErr = errs.length ? errs.join('; ') : null;
+
+  const isOnline = await online();
+  await L.pool(devices, 6, async ({ a, s, dev }) => {
+    // 1. advisories: new to this device, and not a CVE this device was already alerted about (feeds overlap)
+    const done = state.adv[dev] ||= { ids: [], cves: [] };
+    for (const f of s.feeds) for (const it of items[f] || []) {
+      if (done.ids.includes(it.id) || !L.advisoryMatches(it, s)) continue;
+      done.ids.push(it.id);
+      if (it.cves.length && it.cves.every(c => done.cves.includes(c))) continue;
+      done.cves.push(...it.cves);
+      const sev = L.advisorySeverity(it);
+      raise(`adv:${dev}:${shortHash(it.id)}`, sev.prio, T.adv(a, s, it, sev.exploited), T.advBody(a, s, it, f), a.id);
+    }
+    done.ids = done.ids.slice(-1000); done.cves = done.cves.slice(-2000);
+
+    // 2. management interface reachable from the Internet (skipped while Vigía itself is offline)
+    if (s.management && isOnline) {
+      const k = `edge:mgmt:${dev}`;
+      if (await reachable(s.management)) raise(k, 'P2', T.mgmtExposed(a, s), T.mgmtExposedBody(s), a.id);
+      else resolve(k, T.mgmtClosed);
+    }
+    // 3. portal certificate
+    if (s.portal?.startsWith('https://')) {
+      const days = await certDays(s.portal), p = days === null ? null : L.tlsPriority(days), k = `edge:tls:${dev}`;
+      if (p) raise(k, p, T.edgeTls(a, s, days), s.portal, a.id); else if (days !== null) resolve(k, T.tlsRenewed);
+    }
+  });
+}
+
+// ---------- EPSS (every 2 h): escalate open vulnerability alerts that are likely to be exploited soon ----------
+async function checkEpss() {
+  const open = Object.values(state.alerts).filter(a => /^(osv|wp|kev|adv):/.test(a.key));
+  const cvesOf = a => L.cvesIn(`${a.title} ${a.body}`);
+  const want = [...new Set(open.flatMap(cvesOf))].filter(c => !state.epss[c] || Date.now() - state.epss[c].at > 864e5);
+  for (let i = 0; i < want.length; i += 100) {
+    const got = L.parseEpss(await getJSON(`${EPSS_URL}?cve=${want.slice(i, i + 100).join(',')}`));
+    for (const c of want.slice(i, i + 100)) state.epss[c] = { ...(got[c] || { epss: 0, pct: 0 }), at: Date.now() };
+  }
+  for (const a of open) {
+    const e = Math.max(0, ...cvesOf(a).map(c => state.epss[c]?.epss || 0));
+    if (!e) continue;
+    a.epss = e;
+    const p = L.epssPriority(a.prio, e, { p1: +EPSS_P1, p2: +EPSS_P2 });
+    if (p === a.prio) continue;
+    // the risk changed, so an earlier acknowledgement no longer covers it
+    Object.assign(a, { prio: p, ack: false, sentAt: Date.now() });
+    histNote(a, { prio: p });
+    send(p, T.epssUp(a.title, e), a.body, a.key);
+  }
+  for (const [c, v] of Object.entries(state.epss)) if (Date.now() - v.at > 7 * 864e5) delete state.epss[c];
 }
 
 // ---------- Pushed inventory: freshness (every 15 min) ----------
@@ -535,7 +643,7 @@ async function lookupTxt(name) {
 // ---------- Page content: redirects, defacement, new third-party scripts (every 15 min) ----------
 async function checkContent(inv) {
   await L.pool(inv, 8, async a => {
-    if (skips(a, 'content') || state.status[a.id]?.ok === false) return; // a down site already alerts
+    if ((!a.url && !a.domain) || skips(a, 'content') || state.status[a.id]?.ok === false) return; // a down site already alerts
     const url = a.url || `https://${a.domain}`;
     let r, html;
     try {
@@ -661,6 +769,45 @@ async function inventoryPush(req, u) {
     wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), errors }];
 }
 
+// ---------- Monthly report per client ----------
+const clientsOf = inv => [...new Set(inv.map(a => a.client).filter(Boolean))].sort();
+const slug = x => String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'client';
+
+function reportData(client, month) {
+  monthRange(month); // validates
+  const assets = inventory({ includePaused: true }).filter(a => a.client === client);
+  const ids = new Set(assets.map(a => a.id)), open = Object.values(state.alerts).filter(a => ids.has(a.asset));
+  const openFor = prefix => open.filter(x => x.key.startsWith(prefix));
+  return {
+    client, month, brand: REPORT_BRAND, generatedAt: Date.now(), timeZone: DIGEST_TZ, open,
+    history: state.history.filter(h => ids.has(h.asset)),
+    assets: assets.map(a => ({
+      id: a.id, name: a.name || a.id, url: a.url, domain: a.domain, criticality: a.criticality, avail: state.avail[a.id]?.[month] || null,
+      pushedAt: pushed[a.id]?.at || null,
+      edge: a.stack.filter(x => x.edge).map(x => ({ name: x.name, product: x.product, version: x.version,
+        alerts: [`adv:${a.id}:${x.edgeIndex}:`, `edge:mgmt:${a.id}:${x.edgeIndex}`, `edge:tls:${a.id}:${x.edgeIndex}`].reduce((n, p) => n + openFor(p).length, 0) })),
+    })),
+    backups: jobsOf(assets).map(({ key }) => ({ key, ...(state.backups[key] || {}), problems: openFor('backup:').filter(x => x.key.endsWith(`:${key}`)).map(x => x.prio) })),
+  };
+}
+
+const REPORTS = path.join(DATA, 'reports');
+function writeReports(month) {
+  fs.mkdirSync(REPORTS, { recursive: true });
+  const clients = clientsOf(inventory({ includePaused: true }));
+  for (const c of clients) fs.writeFileSync(path.join(REPORTS, `${slug(c)}-${month}.html`), renderReport(reportData(c, month), VIGIA_LANG));
+  return clients.length;
+}
+
+// `node server.mjs report "<client>" YYYY-MM > report.html` (or "all" to write every client into data/reports/)
+if (process.argv[2] === 'report') {
+  const [, , , client, month = previousMonth(monthOf())] = process.argv;
+  if (!client) { console.error('usage: node server.mjs report "<client>"|all [YYYY-MM]'); process.exit(2); }
+  if (client === 'all') console.error(`${writeReports(month)} reports written to ${REPORTS}`);
+  else process.stdout.write(renderReport(reportData(client, month), VIGIA_LANG));
+  process.exit(0);
+}
+
 // ---------- Scheduler ----------
 const runners = {}; // name -> run(), so a push can trigger checks right away
 const every = (name, ms, fn) => {
@@ -688,7 +835,7 @@ async function online() {
 }
 every('uptime', 60_000, async inv => {
   if (!(await online())) throw new Error('Vigía itself seems offline (connectivity probe failed): uptime round skipped');
-  await L.pool(inv, 25, checkAsset);
+  await L.pool(inv.filter(a => a.url || a.domain), 25, checkAsset);
 });
 every('kev', 15 * 60_000, inv => onboard(inv, 'kev', () => checkKEV(inv)));
 setTimeout(() => every('osv', 30 * 60_000, inv => onboard(inv, 'osv', () => checkOSV(inv))), 15_000); // after KEV is loaded
@@ -699,9 +846,11 @@ setTimeout(() => every('domain', 6 * 3600_000, inv => onboard(inv, 'domain', () 
 every('backups', 5 * 60_000, checkBackups);
 setTimeout(() => every('wordpress', 30 * 60_000, inv => onboard(inv, 'wp', () => checkWordPress(inv))), 25_000); // after KEV is loaded
 every('inventory', 15 * 60_000, checkInventoryAge);
+setTimeout(() => every('edge', 15 * 60_000, inv => onboard(inv, 'adv', () => checkEdge(inv))), 35_000); // after KEV is loaded
+setTimeout(() => every('epss', 2 * 3600_000, checkEpss), 90_000); // after the first OSV / Wordfence / KEV results
 
 // Watch the watcher: a feed that misses ~3 cycles is a blind spot
-const STALE = { uptime: 5 * 60_000, kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000, wordpress: 2 * 3600_000 };
+const STALE = { uptime: 5 * 60_000, kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000, wordpress: 2 * 3600_000, edge: 60 * 60_000, epss: 6 * 3600_000 };
 every('health', 60_000, async () => {
   for (const [f, max] of Object.entries(STALE)) {
     // a feed that never succeeded since start counts from the start (a firewall blocking KEV from day one)
@@ -728,6 +877,20 @@ every('health', 60_000, async () => {
     if (gone) savePushed();
   }
   for (const [id, d] of Object.entries(state.osv)) if (now - (d.at || 0) > 30 * 864e5) delete state.osv[id];
+  state.history = state.history.filter(h => !h.resolvedAt || now - h.resolvedAt < 400 * 864e5).slice(-20_000);
+  const keepFrom = previousMonth(previousMonth(monthOf(now - 330 * 864e5)));
+  for (const months of Object.values(state.avail)) for (const m of Object.keys(months)) if (m < keepFrom) delete months[m];
+
+  // New month: write every client's report for the month that just ended (not on a fresh install: there is no data)
+  const thisMonth = monthOf(now);
+  if (state.feeds.reportMonth !== thisMonth) {
+    const fresh = !state.feeds.reportMonth;
+    state.feeds.reportMonth = thisMonth;
+    if (!fresh) {
+      const last = previousMonth(thisMonth), n = writeReports(last);
+      if (n) send('P2', T.reportsReady(n, last), T.reportsReadyBody(PUBLIC_URL && `${PUBLIC_URL.replace(/\/$/, '')}/#reports`));
+    }
+  }
   // Broken chain: retry every 10 min with a message that also tells you alerts may have been lost
   if (state.chain?.ok === false && now - state.chain.at > 10 * 60_000) await notify('P2', T.chainRestored, T.chainRestoredBody);
 
@@ -814,6 +977,13 @@ http.createServer(async (req, res) => {
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }
   if (u.pathname === '/api/test' && req.method === 'POST') { await notify('P1', T.testTitle, T.testBody, 'test'); return json({ ok: true }); }
+  if (u.pathname === '/api/reports') return json({ clients: clientsOf(inventory({ includePaused: true })), months: [monthOf(), previousMonth(monthOf())] });
+  if (u.pathname === '/report') {
+    const client = u.searchParams.get('client'), month = u.searchParams.get('month') || monthOf();
+    if (!clientsOf(inventory({ includePaused: true })).includes(client)) return json({ error: 'unknown client' }, 404);
+    try { return html(renderReport(reportData(client, month), u.searchParams.get('lang') || VIGIA_LANG)); }
+    catch (e) { return json({ error: e.message }, 400); }
+  }
   if (u.pathname === '/') return html(fs.readFileSync(path.join(DIR, 'index.html')));
   json({ error: 'not found' }, 404);
 }).listen(PORT, HOST, () => {

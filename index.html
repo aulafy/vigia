@@ -21,9 +21,10 @@ button,select{background:var(--card);color:var(--tx);border:1px solid var(--bd);
 <h2 id="hAlerts"></h2><div id="alerts"></div>
 <h2 id="hAssets"></h2><div id="assets"></div>
 <h2 id="hBackups"></h2><div id="backups"></div>
+<h2 id="hReports"></h2><div id="reports"></div>
 <script>
-const I={en:{inv:'inventory age',backups:'Backups',noBackups:'No backup jobs in the inventory.',lastOk:'last success',restore:'restore test',size:'size',chainDown:'ALERT CHANNELS FAILING',accept:'Accept change',all:'All',open:'Unacknowledged',test:'Send test alert',alerts:'Active alerts',assets:'Assets',none:'No alerts. All good.',ack:'Acknowledge',acked:'acknowledged',paused:'paused',ago:'ago',never:'never',feed:'feed'},
-         es:{inv:'inventario recibido hace',backups:'Copias de seguridad',noBackups:'No hay tareas de copia en el inventario.',lastOk:'última correcta',restore:'prueba de restauración',size:'tamaño',chainDown:'FALLAN LOS CANALES DE AVISO',accept:'Aceptar cambio',all:'Todas',open:'Sin confirmar',test:'Probar aviso',alerts:'Alertas activas',assets:'Activos',none:'Sin alertas. Todo en orden.',ack:'Confirmar',acked:'confirmada',paused:'en pausa',ago:'hace',never:'nunca',feed:'feed'}};
+const I={en:{reports:'Monthly reports',thisMonth:'this month (so far)',lastMonth:'last month',inv:'inventory age',backups:'Backups',noBackups:'No backup jobs in the inventory.',lastOk:'last success',restore:'restore test',size:'size',chainDown:'ALERT CHANNELS FAILING',accept:'Accept change',all:'All',open:'Unacknowledged',test:'Send test alert',alerts:'Active alerts',assets:'Assets',none:'No alerts. All good.',ack:'Acknowledge',acked:'acknowledged',paused:'paused',ago:'ago',never:'never',feed:'feed'},
+         es:{reports:'Informes mensuales',thisMonth:'este mes (hasta hoy)',lastMonth:'mes pasado',inv:'inventario recibido hace',backups:'Copias de seguridad',noBackups:'No hay tareas de copia en el inventario.',lastOk:'última correcta',restore:'prueba de restauración',size:'tamaño',chainDown:'FALLAN LOS CANALES DE AVISO',accept:'Aceptar cambio',all:'Todas',open:'Sin confirmar',test:'Probar aviso',alerts:'Alertas activas',assets:'Activos',none:'Sin alertas. Todo en orden.',ack:'Confirmar',acked:'confirmada',paused:'en pausa',ago:'hace',never:'nunca',feed:'feed'}};
 let L=I.en;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ago=t=>{if(!t)return L.never;const s=(Date.now()-t)/1000;return s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':Math.round(s/3600)+' h'};
@@ -47,7 +48,11 @@ async function load(){
   const bad=new Set(s.alerts.filter(a=>a.key.startsWith('backup:')).map(a=>a.key.split(':').slice(2).join(':')));
   backups.innerHTML=Object.entries(s.backups).map(([k,b])=>`<div class="card"><div class="l"><span class="dot ${bad.has(k)?'bad':''}"></span><div><b>${esc(k)}</b><small>${L.lastOk}: ${b.lastSuccess?ago(b.lastSuccess):L.never} · ${L.restore}: ${b.lastRestoreTest?ago(b.lastRestoreTest):L.never}</small></div></div><span class="mut r">${L.size} ${kb(b.lastBytes)}</span></div>`).join('')||`<div class="mut">${L.noBackups}</div>`;
 }
+async function loadReports(){
+  const r=await (await fetch('/api/reports')).json();hReports.textContent=L.reports;
+  reports.innerHTML=r.clients.map(c=>`<div class="card"><b>${esc(c)}</b><span>${r.months.map((m,i)=>`<a href="/report?client=${encodeURIComponent(c)}&month=${m}" target="_blank" rel="noopener">${m} (${i?L.lastMonth:L.thisMonth})</a>`).join(' · ')}</span></div>`).join('');
+}
 alerts.onclick=async e=>{const k=e.target.dataset.k;if(k){await fetch('/api/ack?key='+encodeURIComponent(k),{method:'POST',headers:{'x-vigia-ui':'1'}});load()}};
 test.onclick=()=>fetch('/api/test',{method:'POST',headers:{'x-vigia-ui':'1'}});f.onchange=load;
-load();setInterval(load,10000);
+load().then(loadReports);setInterval(load,10000);
 </script></body></html>
