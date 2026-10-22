@@ -41,13 +41,13 @@ async function load(){
   alerts.innerHTML=list.map(a=>
    `<div class="card"><div><span class="tag ${a.prio}">${a.prio}</span> <b>${esc(a.title)}</b><small>${esc(a.body)} · ${ago(a.first)}</small></div>
     <div class="r">${a.ack?`<span class="mut">${L.acked}</span>`:`<button data-k="${esc(a.key)}">${a.accept?L.accept:L.ack}</button>`}</div></div>`).join('')||`<div class="mut">${L.none}</div>`;
-  assets.innerHTML=s.inventory.map(a=>{const t=s.status[a.id]||{};return `<div class="card"><div class="l"><span class="dot ${a.paused?'off':t.ok===false?'bad':''}"></span><div><b>${esc(a.client)}</b> · ${esc(a.name)}${a.paused?` <span class="mut">(${L.paused})</span>`:''}<small>${esc(a.url||a.domain)} · ${a.stack.slice(0,6).map(x=>esc(x.slug||x.name||x.product)+' '+esc(x.version||'')).join(', ')}${a.stack.length>6?` +${a.stack.length-6}`:''}${s.pushed[a.id]?.at?` · ${L.inv} ${ago(s.pushed[a.id].at)} (${esc(s.pushed[a.id].host||'')})`:''}</small></div></div>
+  assets.innerHTML=s.inventory.map(a=>{const t=s.status[a.id]||{};return `<div class="card"><div class="l"><span class="dot ${a.paused?'off':t.ok===false?'bad':''}"></span><div><b>${esc(a.client)}</b> · ${esc(a.name)}${a.paused?` <span class="mut">(${L.paused})</span>`:''}<small>${esc(a.url||a.domain)} · ${a.stack.slice(0,6).map(x=>esc(x.slug||x.name||x.product)+' '+esc(x.version||'')).join(', ')}${a.stackCount>6?` +${a.stackCount-6}`:''}${s.pushed[a.id]?.at?` · ${L.inv} ${ago(s.pushed[a.id].at)} (${esc(s.pushed[a.id].host||'')})`:''}</small></div></div>
    <span class="mut r">${t.code||'-'} · ${t.ms??'-'} ms · TLS ${t.tlsDays??'-'} d · ${esc(a.criticality)}</span></div>`}).join('');
   const kb=n=>n==null?'-':n>1e9?(n/1e9).toFixed(1)+' GB':n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1e3)+' kB';
   const bad=new Set(s.alerts.filter(a=>a.key.startsWith('backup:')).map(a=>a.key.split(':').slice(2).join(':')));
   backups.innerHTML=Object.entries(s.backups).map(([k,b])=>`<div class="card"><div class="l"><span class="dot ${bad.has(k)?'bad':''}"></span><div><b>${esc(k)}</b><small>${L.lastOk}: ${b.lastSuccess?ago(b.lastSuccess):L.never} · ${L.restore}: ${b.lastRestoreTest?ago(b.lastRestoreTest):L.never}</small></div></div><span class="mut r">${L.size} ${kb(b.lastBytes)}</span></div>`).join('')||`<div class="mut">${L.noBackups}</div>`;
 }
-alerts.onclick=async e=>{const k=e.target.dataset.k;if(k){await fetch('/api/ack?key='+encodeURIComponent(k),{method:'POST'});load()}};
-test.onclick=()=>fetch('/api/test',{method:'POST'});f.onchange=load;
+alerts.onclick=async e=>{const k=e.target.dataset.k;if(k){await fetch('/api/ack?key='+encodeURIComponent(k),{method:'POST',headers:{'x-vigia-ui':'1'}});load()}};
+test.onclick=()=>fetch('/api/test',{method:'POST',headers:{'x-vigia-ui':'1'}});f.onchange=load;
 load();setInterval(load,10000);
 </script></body></html>

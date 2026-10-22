@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.1 — 2026-10-22 (code review)
+
+### Fixed: silent failures
+- An unreadable `inventory.json` no longer empties the inventory or deletes every alert. Vigía keeps the last valid copy and raises a P2. While the inventory has errors, no alert or baseline is deleted as an orphan.
+- Unacknowledged P1s now repeat every 10 minutes whatever check raised them. KEV, domain and WordPress P1s used to repeat only when their check ran again.
+- New assets and newly reported products are matched against the last 90 days of CISA KEV. Before, only entries added after the asset existed were checked.
+- A feed that has never succeeded since startup now goes stale and alerts.
+- One failed OSV detail request no longer aborts the whole scan. Details are fetched in parallel and refreshed weekly.
+- Request bodies are decoded as bytes. A UTF-8 character split across chunks broke check-in and push signatures.
+- `.env` values in quotes are unquoted (`NTFY_TOPIC="x"` used to keep the quotes).
+- Assets with only an `https://` url now get a TLS check, on the host they actually serve.
+- An endoflife.date scan where every lookup failed counts as failed, not clean.
+- An unreadable `state.json` is kept as `state.json.corrupt-<time>` instead of being silently overwritten.
+
+### Fixed: scale
+- Bounded parallelism: uptime 25, DNS 10, content 8, OSV details 8.
+- The inventory is cached until `inventory.json` changes or a push arrives.
+- `/api/state` returns at most 6 stack items per asset.
+- The OSV cache expires after 30 days. State of removed assets (baselines, scans, pushed inventories) is cleaned up.
+- When Vigía's own connection is down (connectivity probe, `CONNECTIVITY_URLS`), the uptime round is skipped instead of marking every site down.
+- **Grouping:** when one run produces more than 3 messages, a single summary goes out instead.
+
+### Fixed: security
+- Per-asset check-in keys (`node server.mjs key <asset>`), with `CHECKIN_ALLOW_MASTER=false` to reject the master secret.
+- CSRF: dashboard POSTs require an `x-vigia-ui` header.
+- DNS rebinding: without `DASH_PASS`, only known host names may open the dashboard (`DASH_HOSTS`).
+- Constant-time Basic auth comparison. `/healthz` no longer exposes feed errors, which contained client domains. Security headers added: frame-ancestors none, no-referrer, nosniff, CSP.
+- Notification titles and bodies are clipped to the channels' size limits.
+
 ## 0.6.0 — 2026-10-22
 
 ### Added

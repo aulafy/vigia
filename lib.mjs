@@ -423,6 +423,32 @@ export function inventoryStale(asset, rec, now = Date.now()) {
   return now - ref > maxH * 3600_000 ? { hours, never: !rec?.at, maxH } : null;
 }
 
+// ---------- Plumbing ----------
+// Run fn over items with at most n in flight; results keep the input order
+export async function pool(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, worker));
+  return out;
+}
+
+// One .env line → [name, value]; quotes are stripped and unquoted " # comments" dropped
+export function parseEnvLine(line) {
+  const m = String(line).match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+  if (!m) return null;
+  const v = m[2];
+  return [m[1], /^(["']).*\1$/.test(v) ? v.slice(1, -1) : v.replace(/\s+#.*$/, '')];
+}
+
+// Per-asset check-in key derived from the master secret: a compromised server can only report for its own asset
+export const deriveKey = (master, assetId) => crypto.createHmac('sha256', master).update(`vigia-asset:${assetId}`).digest('hex');
+
+export const clip = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+
+// The KEV search terms of a stack item, as one stable string (to remember which ones were already checked)
+export const kevTerm = item => (item.kev ? [].concat(item.kev).join('|') : item.product || '').toLowerCase();
+
 export function localClock(timeZone, date = new Date()) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
     timeZone, hourCycle: 'h23', hour: 'numeric', year: 'numeric', month: '2-digit', day: '2-digit',

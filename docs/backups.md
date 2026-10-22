@@ -51,7 +51,7 @@ A job that has never reported starts its RPO clock when it first appears in the 
 
 ## 2. Configure the secret
 
-On the Vigía server, set a random `CHECKIN_SECRET` in `.env`:
+On the Vigía server, set a random `CHECKIN_SECRET` in `.env`. This is the master secret: the keys for each asset are derived from it (see below).
 
 ```bash
 openssl rand -hex 32
@@ -62,6 +62,9 @@ The backup hosts must reach Vigía over HTTPS, behind a reverse proxy, Tailscale
 ## 3. Call it from the job
 
 Copy `deploy/vigia-checkin.sh` to the backup host and set two variables:
+
+> **Give each server its own key, not the master secret.** On the Vigía host, run `node server.mjs key <asset-id>` and use the result as `VIGIA_CHECKIN_SECRET` on that asset's servers. A key only works for its own asset, so a compromised server cannot fake backups or inventories for other clients. Once every server has its own key, set `CHECKIN_ALLOW_MASTER=false`.
+
 
 ```bash
 export VIGIA_URL=https://vigia.example.com

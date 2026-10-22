@@ -30,6 +30,9 @@ Each push **replaces** that asset's pushed components. The components declared b
 2. Make Vigía reachable over HTTPS from the servers (see [deployment.md](deployment.md#exposing-the-dashboard-optional)).
 3. Copy `deploy/vigia-collect.sh` to each server, try it with `--dry-run`, then schedule it:
 
+> **Give each server its own key, not the master secret.** On the Vigía host, run `node server.mjs key <asset-id>` and use the result as `VIGIA_CHECKIN_SECRET` on that asset's servers. A key only works for its own asset, so a compromised server cannot fake backups or inventories for other clients. Once every server has its own key, set `CHECKIN_ALLOW_MASTER=false`.
+
+
 ```bash
 # WordPress site, daily at 03:15
 15 3 * * * VIGIA_URL=https://vigia.example.com VIGIA_CHECKIN_SECRET=… WP_CLI="sudo -u www-data wp" \

@@ -364,3 +364,36 @@ test('inventoryStale', () => {
   assert.deepEqual(L.inventoryStale({ inventoryMaxAgeHours: 24 }, { since: now - 30 * H }, now), { hours: 30, never: true, maxH: 24 });
   assert.equal(L.inventoryStale({ inventoryMaxAgeHours: 24 }, { since: now - 2 * H }, now), null);
 });
+
+test('pool keeps order and limits concurrency', async () => {
+  let live = 0, peak = 0;
+  const out = await L.pool([5, 1, 4, 2, 3], 2, async x => { live++; peak = Math.max(peak, live); await new Promise(r => setTimeout(r, x)); live--; return x * 10; });
+  assert.deepEqual(out, [50, 10, 40, 20, 30]);
+  assert.equal(peak, 2);
+  assert.deepEqual(await L.pool([], 5, async x => x), []);
+});
+
+test('parseEnvLine strips quotes and comments', () => {
+  assert.deepEqual(L.parseEnvLine('NTFY_TOPIC="abc def"'), ['NTFY_TOPIC', 'abc def']);
+  assert.deepEqual(L.parseEnvLine("export X='1'"), ['X', '1']);
+  assert.deepEqual(L.parseEnvLine('PORT=4848   # dashboard'), ['PORT', '4848']);
+  assert.deepEqual(L.parseEnvLine('URL=https://x.io/#frag'), ['URL', 'https://x.io/#frag']);
+  assert.equal(L.parseEnvLine('# comment'), null);
+  assert.equal(L.parseEnvLine(''), null);
+});
+
+test('deriveKey is per asset and deterministic', () => {
+  assert.equal(L.deriveKey('m', 'a'), L.deriveKey('m', 'a'));
+  assert.notEqual(L.deriveKey('m', 'a'), L.deriveKey('m', 'b'));
+  assert.notEqual(L.deriveKey('m', 'a'), L.deriveKey('n', 'a'));
+  assert.match(L.deriveKey('m', 'a'), /^[0-9a-f]{64}$/);
+});
+
+test('clip and kevTerm', () => {
+  assert.equal(L.clip('abcdef', 4), 'abc…');
+  assert.equal(L.clip('abc', 4), 'abc');
+  assert.equal(L.clip(undefined, 4), '');
+  assert.equal(L.kevTerm({ product: 'WordPress' }), 'wordpress');
+  assert.equal(L.kevTerm({ product: 'apache', kev: ['Apache HTTP Server', 'httpd'] }), 'apache http server|httpd');
+  assert.equal(L.kevTerm({ ecosystem: 'npm', name: 'x' }), '');
+});

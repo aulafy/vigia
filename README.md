@@ -49,6 +49,7 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **Alerts deduplicate and close themselves.** A finding is reported once. Once you upgrade the dependency, the next scan closes the alert.
 - **Change alerts learn.** The first time Vigía sees a site's nameservers, registrar or third-party scripts, it saves them as the baseline. When something differs, you get an alert with an **Accept change** button. If the change was yours, one tap makes it the new baseline. A DNS change has to show up twice in a row before it alerts, so a flaky resolver does not page you.
 - **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone.
+- **Bursts are grouped.** When one check produces more than 3 messages at once, for example 30 sites on the same server going down, you get one summary instead of 30 pages. If Vigía's own connection drops, it notices and skips the uptime round instead of reporting every site as down.
 - **The watcher is watched.** If Vigía crashes, the machine goes off or the network drops, its heartbeat stops and an external service (healthchecks.io, Better Stack…) pages you. If a vulnerability feed stops updating, you get a P2 about that blind spot.
 - **So is the alert chain.** Each channel is retried and checked for real delivery. If one fails, the others tell you. If all fail, Vigía sends `/fail` to the heartbeat service, which reaches you by email or SMS. Once a week a **canary** alert asks you to acknowledge it. If nobody does, Vigía treats the chain as broken, because "the push was sent" does not prove that anyone saw it.
 
@@ -149,6 +150,9 @@ All settings are environment variables, which can live in `.env`:
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
 | `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`) |
 | `DIGEST_HOUR`, `DIGEST_TZ` | `9`, `Europe/Madrid` | When to send the daily digest |
+| `CONNECTIVITY_URLS` | Cloudflare trace, `1.1.1.1` | Probed before each uptime round. If none answers, Vigía is the one offline: the round is skipped instead of paging for every site. |
+| `CHECKIN_ALLOW_MASTER` | `true` | Set to `false` once every server uses its own key (`node server.mjs key <asset>`) |
+| `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8` | Resolvers for the DNS check. Public resolvers avoid stale local caches and split-horizon answers. |
 | `VIGIA_INV`, `VIGIA_STATE` | `data/inventory.json`, `data/state.json` | File locations |
 
