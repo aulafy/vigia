@@ -1,7 +1,7 @@
 // Vigía service worker: makes the dashboard installable and lets the shell open without a connection.
 // Data (/api, /report) is never cached: an alert screen must not show stale alerts as if they were current.
-const CACHE = 'vigia-shell-0.9.0';
-const SHELL = ['/', '/app.css', '/app.js', '/model.js', '/icons.js', '/theme.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'vigia-shell-0.10.0';
+const SHELL = ['/', '/app.css', '/app.js', '/model.js', '/icons.js', '/editor.js', '/validate.js', '/theme.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(

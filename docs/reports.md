@@ -9,6 +9,7 @@ Vigilance that nobody sees is hard to charge for. Vigía can prepare a **monthly
 - **Sites and services:** availability per site, its criticality and when the server last reported its inventory.
 - **Firewalls, VPN and remote access:** each declared device with its version and open alerts.
 - **Backups:** last good backup and last restore test per job, with any problem.
+- **Planned maintenance** of the month, when there was any: when, what it covered and why. Probes during maintenance are not counted in availability.
 - **Open issues** and **what happened this month**: every incident with when it opened, when it closed and how. It can be resolved, acknowledged, or closed as an accepted change.
 
 Availability counts the uptime probes of the month. Rounds skipped because Vigía itself was offline are not counted, so they cannot lower the figure. P3 findings stay out of the incident counts, because they are maintenance, not incidents.

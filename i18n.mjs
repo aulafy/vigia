@@ -2,6 +2,7 @@
 const en = {
   repeat: t => `(repeat) ${t}`,
   escalated: t => `(worse) ${t}`,
+  afterMaintenance: t => `(after maintenance) ${t}`,
   recovered: t => `RECOVERED ${t}`,
   down: a => `${a.client}: ${a.name} is DOWN`,
   downBody: (a, why, n) => `${why} (${n} consecutive failures) — ${a.url || a.domain}. Contact: ${a.contact || '-'}`,
@@ -126,6 +127,7 @@ const en = {
 const es = {
   repeat: t => `(repite) ${t}`,
   escalated: t => `(empeora) ${t}`,
+  afterMaintenance: t => `(tras el mantenimiento) ${t}`,
   recovered: t => `RECUPERADO ${t}`,
   down: a => `${a.client}: ${a.name} CAÍDA`,
   downBody: (a, why, n) => `${why} (${n} fallos seguidos) — ${a.url || a.domain}. Contacto: ${a.contact || '-'}`,

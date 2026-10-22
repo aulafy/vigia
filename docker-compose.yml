@@ -1,6 +1,7 @@
 services:
   vigia:
-    build: .
+    # Published image (amd64 and arm64). To build from this checkout instead, replace the next line with: build: .
+    image: ghcr.io/aulafy/vigia:latest
     restart: unless-stopped
     env_file: .env
     # The container listens on all its interfaces, so Vigía requires DASH_PASS in .env (it refuses to start without it)

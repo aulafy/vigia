@@ -30,7 +30,7 @@ Edit `.env`. These are the settings that matter on day one:
 Start it:
 
 ```bash
-docker compose up -d          # dashboard on 127.0.0.1:4848 (reach it with: ssh -L 4848:127.0.0.1:4848 you@vps)
+docker compose up -d          # pulls ghcr.io/aulafy/vigia; dashboard on 127.0.0.1:4848 (ssh -L 4848:127.0.0.1:4848 you@vps)
 # or
 npm start                     # without Docker
 ```
@@ -45,7 +45,9 @@ To install the dashboard as a phone app, Vigía must be served over HTTPS (Caddy
 
 ## 2. Add a client
 
-Clients live in `data/inventory.json`. Vigía picks up changes without a restart, and a typo never empties it: the last valid copy stays in use and you get a P2.
+**From the dashboard:** **Clients → Add asset** (or **Add asset** on a client's page). The form has the same fields as below, checks them as you type, and proposes the ID. From a client's page you can also **Edit**, **Pause** and delete each asset. Every save keeps the previous `inventory.json` in `data/inventory-history/`.
+
+**Or by hand:** clients live in `data/inventory.json`. Vigía picks up changes without a restart, and a typo never empties it: the last valid copy stays in use and you get a P2. If you edit the file while a form is open in the dashboard, saving the form warns you instead of overwriting your edit.
 
 **Minimum: one site.**
 
@@ -81,7 +83,7 @@ This alone gives you uptime, TLS, domain expiry, DNS hijack detection, SPF/DMARC
 | Backup jobs | `backups` with `rpoHours` | [backups.md](backups.md) |
 | A `.es` domain's expiry (no public RDAP) | `"domainExpires": "2027-03-01"` | [inventory.md](inventory.md#domain-dns-and-content-checks) |
 | Legitimate third-party scripts and redirects | `allowedHosts` | [inventory.md](inventory.md) |
-| A migration without noise | `"paused": true` | |
+| A migration without noise | a **maintenance window** (client page → Maintenance), or `"paused": true` for longer breaks | [alerts.md](alerts.md#maintenance-windows) |
 
 A new asset's first scan sends **one summary** ("12 findings · P1: 1 · P2: 3 · P3: 8"), not twelve alerts. Work through it from the dashboard.
 
@@ -147,6 +149,7 @@ Both scripts need only `sh`, `openssl` and `curl`. Details: [inventory-push.md](
 | **Weekly** | Acknowledge the weekly test alert. Review **Devices**: anything without an exploited-flaw alert but on old firmware? |
 | **When you patch a firewall** | Update its `version` in the inventory, or add `"checked": "YYYY-MM-DD"`. Otherwise Vigía asks after 60 days. |
 | **Monthly (day 1)** | Reports are ready under **Reports**. Open each client's, print to PDF and send it. |
+| **Before planned work** (updates, migrations, hardware swaps) | Schedule a **maintenance window** on the client's page: no pages during the work, downtime not counted against availability, and anything still broken afterwards is sent when it ends. |
 | **When you add a client** | Add it to the inventory, connect its servers (§3), and work through its onboarding summary. |
 | **Before upgrading Vigía** | Read the [CHANGELOG](../CHANGELOG.md): **Breaking** entries need a config change. Back up `data/`. |
 
@@ -166,7 +169,9 @@ Both scripts need only `sh`, `openssl` and `curl`. Details: [inventory-push.md](
 | Check-in / push `409` | Replayed or older than the last accepted call | Usually harmless after a retry; check that two jobs don't share one asset/job id. |
 | Check-in `404` | The asset or job id is not in the inventory | Add `backups: [{ "id": … }]` to the asset. |
 | `vigia-collect.sh` answers `400` | PHP printed notices into the WP-CLI JSON | Run with `--dry-run`, fix the notices or set `display_errors=Off` for the CLI. |
-| P2 *inventory.json cannot be read* | JSON syntax error | Fix the file; Vigía keeps the last valid copy meanwhile. |
+| P2 *inventory.json cannot be read* | JSON syntax error | Fix the file (or restore one from `data/inventory-history/`); Vigía keeps the last valid copy meanwhile. The dashboard editor is disabled until then. |
+| Saving a form: *inventory.json changed meanwhile* | Someone edited the file, or saved another form | Your changes are kept: review them and save again. |
+| No alerts from a client for a while | A maintenance window is still active | Check **Today** or **Settings → Maintenance**, and press **End now**. |
 | Many alerts after adding a client | Expected: old software | Work through the onboarding summary; P3s only go to the digest. |
 | No WordPress alerts at all | `WORDFENCE_API_KEY` not set (there is a P3 saying so) | Add the free key. |
 | High memory use | The Wordfence feed is parsed every 6 h | Give the host 1 GB, or leave WordPress checks off. |
@@ -181,6 +186,7 @@ node server.mjs key <asset-id>               # per-asset key for check-ins and p
 node server.mjs report "<client>" 2026-10 > report.html   # one monthly report
 node server.mjs report all 2026-10           # every client into data/reports/
 curl -s localhost:4848/healthz               # liveness
+docker compose pull && docker compose up -d  # update (Docker; pin a version with image: ghcr.io/aulafy/vigia:0.10)
 docker compose logs -f                       # logs (Docker)
 journalctl -u vigia -f                       # logs (systemd)
 ```

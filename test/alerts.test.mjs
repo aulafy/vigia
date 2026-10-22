@@ -141,3 +141,23 @@ test('firstOf binds acknowledge links to one alert instance or group', async () 
   assert.equal(A.firstOf(sent.at(-1).key), state.groups[sent.at(-1).key.slice(6)].at);
   assert.equal(A.firstOf('down:none'), null);
 });
+
+test('maintenance: alerts are kept but not sent; still-open ones go out when the window ends', async () => {
+  const sent = [], clock = { t: Date.parse('2026-10-23T10:00:00Z') }, state = {};
+  let muted = true;
+  const A = createAlerts({ state, T: messages('en'), notify: async (...m) => { sent.push(m); return { sent: 1 }; }, applyAccept, now: () => clock.t, isMuted: id => muted && id === 'shop' });
+  await A.run('uptime', async () => { A.raise('down:shop', 'P1', 'Shop DOWN', '', 'shop'); A.raise('tls:shop', 'P2', 'cert', '', 'shop'); A.raise('down:other', 'P1', 'Other DOWN', '', 'other'); });
+  assert.deepEqual(sent.map(m => m[3]), ['down:other'], 'only the asset outside maintenance pages');
+  assert.ok(state.alerts['down:shop'].muted);
+  A.resolve('tls:shop', 'renewed'); // fixed during the window: nothing to announce
+  clock.t += 20 * 60_000;
+  await A.run('health', async () => A.sweep());
+  assert.ok(!sent.some(m => m[3] === 'down:shop'), 'no P1 repeat during maintenance');
+  muted = false;
+  await A.run('health', async () => A.sweep());
+  const after = sent.filter(m => m[3] === 'down:shop');
+  assert.equal(after.length, 1);
+  assert.match(after[0][1], /after maintenance/);
+  assert.ok(!sent.some(m => /RECOVERED cert/.test(m[1])));
+  assert.equal(state.alerts['down:shop'].muted, undefined);
+});

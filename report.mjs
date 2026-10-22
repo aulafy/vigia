@@ -8,7 +8,7 @@ const R = {
     history: 'What happened this month', opened: 'Opened', closed: 'Closed', status: 'Status', resolved: 'resolved', acked: 'acknowledged',
     stillOpen: 'open', accepted: 'change accepted', backups: 'Backups', job: 'Job', lastOk: 'Last good backup', restore: 'Last restore test',
     edge: 'Firewalls, VPN and remote access', device: 'Device', version: 'Version', alerts: 'Open alerts', recs: 'Recommended actions',
-    noRecs: 'No pending actions. Keep the current routine.', cat: {
+    noRecs: 'No pending actions. Keep the current routine.', maint: 'Planned maintenance', maintNote: 'Probes during planned maintenance are not counted in availability.', everything: 'all services', cat: {
       availability: 'Availability and certificates', vulns: 'Vulnerabilities and outdated software', domain: 'Domain and email',
       backup: 'Backups', web: 'Website integrity', edge: 'Firewalls and VPN', other: 'Monitoring',
     }, foot: 'Monitored 24/7 with Vigía (github.com/aulafy/vigia). P1 = act now, P2 = act within hours, P3 = plan it.',
@@ -21,7 +21,7 @@ const R = {
     history: 'Qué ha pasado este mes', opened: 'Abierta', closed: 'Cerrada', status: 'Estado', resolved: 'resuelta', acked: 'atendida',
     stillOpen: 'abierta', accepted: 'cambio aceptado', backups: 'Copias de seguridad', job: 'Tarea', lastOk: 'Última copia correcta', restore: 'Última prueba de restauración',
     edge: 'Firewalls, VPN y acceso remoto', device: 'Equipo', version: 'Versión', alerts: 'Alertas abiertas', recs: 'Acciones recomendadas',
-    noRecs: 'No hay acciones pendientes. Mantener la rutina actual.', cat: {
+    noRecs: 'No hay acciones pendientes. Mantener la rutina actual.', maint: 'Mantenimiento programado', maintNote: 'Las comprobaciones durante el mantenimiento programado no cuentan en la disponibilidad.', everything: 'todos los servicios', cat: {
       availability: 'Disponibilidad y certificados', vulns: 'Vulnerabilidades y software obsoleto', domain: 'Dominio y correo',
       backup: 'Copias de seguridad', web: 'Integridad de la web', edge: 'Firewalls y VPN', other: 'Monitorización',
     }, foot: 'Vigilancia 24/7 con Vigía (github.com/aulafy/vigia). P1 = actuar ya, P2 = actuar en horas, P3 = planificar.',
@@ -140,6 +140,13 @@ ${table([S.site, S.crit, S.checks, S.avail, S.lastInv], d.assets.filter(a => a.u
 ${edges.length ? `<h2>${esc(S.edge)}</h2>${table([S.device, S.version, S.site, S.alerts], edges.map(e => [`<b>${esc(e.name)}</b><br><span class="mut">${esc(e.product)}</span>`, esc(e.version || S.na), esc(e.site), e.alerts ? `<b>${e.alerts}</b>` : '<span class="good">0</span>']))}` : ''}
 
 ${d.backups.length ? `<h2>${esc(S.backups)}</h2>${table([S.job, S.lastOk, S.restore, S.status], d.backups.map(b => [esc(b.key), esc(date(b.lastSuccess)), esc(b.lastRestoreTest ? date(b.lastRestoreTest) : S.never), b.problems.length ? b.problems.map(tag).join(' ') : '<span class="good">OK</span>']))}` : ''}
+
+${(() => {
+  const m = (d.maintenance || []).filter(w => Date.parse(w.from) < to && Date.parse(w.to) > from);
+  if (!m.length) return '';
+  const who = w => (w.all ? S.everything : w.client ? w.client : d.assets.filter(a => (w.assets || []).includes(a.id)).map(a => a.name).join(', '));
+  return `<h2>${esc(S.maint)}</h2><p class="mut">${esc(S.maintNote)}</p>${table([S.opened, S.closed, S.site, S.issue], m.map(w => [esc(dt(Date.parse(w.from))), esc(dt(Date.parse(w.to))), esc(who(w)), esc(w.reason || '')]))}`;
+})()}
 
 <h2>${esc(S.openTitle)}</h2>
 ${table([S.prio, S.issue, S.since], open.map(a => [tag(a.prio), esc(a.title), esc(date(a.first))]))}

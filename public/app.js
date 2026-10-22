@@ -1,6 +1,7 @@
 // Vigía dashboard: hash router + seven screens, rendered from /api/state every 10 s. No framework, no build step.
 import { icon } from './icons.js';
 import * as M from './model.js';
+import { ed, openEditor, editorPage, onInput as editorInput, onAction as editorAction, maintenanceBlock, onMaintenanceInput, onMaintenanceAction } from './editor.js';
 
 const esc = M.esc;
 const root = document.getElementById('root');
@@ -17,7 +18,7 @@ const MORE = ['copias', 'informes', 'ajustes'];
 
 function route() {
   const [page, ...rest] = location.hash.replace(/^#\/?/, '').split('/');
-  return { page: NAV.some(n => n[0] === page) || page === 'mas' ? page : 'hoy', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
+  return { page: NAV.some(n => n[0] === page) || ['mas', 'editar', 'nuevo'].includes(page) ? page : 'hoy', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
 }
 
 async function api(method, path, signal) {
@@ -62,11 +63,14 @@ function alertRow(a, idx, { client = true } = {}) {
   return `<div class="row alert ${a.ack ? 'acked' : ''}"><span class="tag ${a.prio}">${a.prio}</span><div class="main"><div class="title">${esc(a.title)}</div><div class="meta">${meta}</div><div class="body clamp ${ui.open.has(a.key) ? 'open' : ''}" data-act="expand" data-key="${esc(a.key)}" role="button" tabindex="0" aria-expanded="${ui.open.has(a.key)}" aria-label="${esc(ui.open.has(a.key) ? t.showLess : t.showMore)}: ${esc(a.title)}">${esc(a.body)}</div></div><div class="side-r">${action}</div></div>`;
 }
 
-function siteRow(a, S) {
-  const t = T(), st = S.status?.[a.id] || {}, bad = st.ok === false;
+function siteRow(a, S, { actions = false } = {}) {
+  const t = T(), st = S.status?.[a.id] || {}, bad = st.ok === false, maint = M.assetInMaintenance(S, a);
   const meta = [esc(a.url || a.domain), st.code ? `HTTP ${st.code}` : '', st.ms != null ? `${st.ms} ms` : '', st.tlsDays != null ? `TLS ${st.tlsDays} d` : ''].filter(Boolean).join(' · ');
   const avail = a.avail ? M.fmtPct(a.avail[1], a.avail[0]) : '—';
-  return `<div class="row"><span class="state ${a.paused ? 'off' : bad ? 'bad' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}</div><div class="meta">${meta}</div></div><div class="side-r"><span class="pill ${bad ? 'bad' : 'ok'}">${esc(bad ? t.down : t.up)}</span><span class="mut small">${esc(avail)}</span></div></div>`;
+  const site = a.url || a.domain, E = t.ed;
+  const status = site ? `<span class="pill ${bad ? 'bad' : 'ok'}">${esc(bad ? t.down : t.up)}</span><span class="mut small">${esc(avail)}</span>` : `<span class="mut small">${esc(`${(a.edge || []).length} ${t.devices}`)}</span>`;
+  const acts = actions ? `<span class="rowacts"><a class="btn small" href="#/editar/${encodeURIComponent(a.id)}">${esc(E.edit)}</a><button class="btn small" data-act="pause" data-key="${esc(a.id)}" data-v="${a.paused ? 0 : 1}">${esc(a.paused ? E.resume : E.pause)}</button></span>` : '';
+  return `<div class="row"><span class="state ${a.paused ? 'off' : maint ? 'warn' : bad ? 'bad' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}${maint ? ` <span class="pill warn">${esc(t.mt.title)}</span>` : ''}</div><div class="meta">${site ? meta : esc(a.id)}</div></div><div class="side-r">${status}${acts}</div></div>`;
 }
 
 function deviceRow(d) {
@@ -97,7 +101,9 @@ const PAGES = {
     const kpis = `<div class="kpis">${kpi(`${s.up}/${s.sites}`, t.sitesUp)}${kpi(s.p1, t.p1)}${kpi(s.p2, t.p2)}${kpi(ago(s.lastCheck), t.lastCheck)}</div>`;
     const ch = M.channelsView(S).filter(c => c.configured).map(c => `<span class="pill ${c.ok ? 'ok' : 'bad'}" title="${esc(c.err || '')}">${icon(c.ok ? 'check' : 'x', 'sm')}${esc(c.name)}</span>`).join(' ') || `<span class="pill bad">${esc(t.notSet)}</span>`;
     const feeds = M.feedsView(S).filter(f => f.at || f.err).map(f => `<span class="pill ${f.err ? 'warn' : ''}" title="${esc(f.err || '')}">${esc(f.name)} · ${esc(ago(f.at))}</span>`).join(' ');
-    return head(t.nav.hoy, t.sub.hoy) + hero + kpis
+    const maint = M.maintenanceView(S).filter(w => w.active);
+    const mbanner = maint.length ? `<div class="banner warn">${icon('clock')}${esc(t.mt.active)}: ${maint.map(w => esc(w.covers === '*' ? t.mt.everything : w.covers)).join(' · ')}</div>` : '';
+    return head(t.nav.hoy, t.sub.hoy) + mbanner + hero + kpis
       + section(t.urgent, list(s.urgent.map(a => alertRow(a, idx)), t.nothingUrgent), 'bell')
       + section(t.health, `<div class="card"><div class="small mut">${esc(t.channels)}</div><div style="margin:6px 0 12px">${ch}</div><div class="small mut">${esc(t.feeds)}</div><div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${feeds}</div></div>`, 'shield');
   },
@@ -114,7 +120,7 @@ const PAGES = {
   clientes(S, arg) {
     const t = T(), view = M.clientsView(S);
     if (arg) return clientDetail(S, view.find(c => c.name === arg));
-    return head(t.nav.clientes, t.sub.clientes) + list(view.map(c => {
+    return head(t.nav.clientes, t.sub.clientes, `<a class="btn primary" href="#/nuevo">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`) + list(view.map(c => {
       const meta = [`${c.assets.filter(a => a.url || a.domain).length} ${t.sites}`, c.devices ? `${c.devices} ${t.devices}` : '', c.checks ? `${M.fmtPct(c.ok, c.checks)} ${t.availability}` : ''].filter(Boolean).join(' · ');
       return `<a class="row link" href="#/clientes/${encodeURIComponent(c.name)}" style="color:inherit;text-decoration:none"><span class="state ${c.P1 || c.down ? 'bad' : c.P2 ? 'warn' : ''}"></span><div class="main"><div class="title">${esc(c.name)}</div><div class="meta">${esc(meta)}</div></div><div class="side-r">${tags(c) || `<span class="pill ok">OK</span>`}</div>${icon('chevron', 'sm')}</a>`;
     }), t.clientsEmpty);
@@ -154,7 +160,17 @@ const PAGES = {
           <dt>EPSS</dt><dd>P1 ≥ ${Math.round((c.epss?.[0] ?? 0.5) * 100)} % · P2 ≥ ${Math.round((c.epss?.[1] ?? 0.1) * 100)} %</dd>
           <dt>Vigía</dt><dd>v${esc(S.version)} · <a href="https://github.com/aulafy/vigia#readme" target="_blank" rel="noopener">${esc(t.docs)} ${icon('ext', 'sm')}</a></dd></dl></div>
       </div>`
-      + section(t.channels, list(channels, t.notSet), 'bell') + section(t.feeds, list(feeds, t.none), 'refresh');
+      + maintenanceBlock(S, t) + section(t.channels, list(channels, t.notSet), 'bell') + section(t.feeds, list(feeds, t.none), 'refresh');
+  },
+
+  editar(S, arg) {
+    openEditor(location.hash, arg, null, () => { ui.html = ''; render(); });
+    return editorPage(T(), ed.draft?.client ? `#/clientes/${encodeURIComponent(ed.draft.client)}` : '#/clientes');
+  },
+
+  nuevo(S, arg) {
+    openEditor(location.hash, null, arg, () => { ui.html = ''; render(); });
+    return editorPage(T(), arg ? `#/clientes/${encodeURIComponent(arg)}` : '#/clientes');
   },
 
   mas() {
@@ -170,24 +186,25 @@ function clientDetail(S, c) {
   const open = M.sortAlerts((S.alerts || []).filter(a => ids.has(a.asset)));
   const devices = M.devicesView(S).filter(d => d.client === c.name), backups = M.backupsView(S).filter(b => b.client === c.name);
   const sites = c.assets.filter(a => a.url || a.domain), contact = c.assets.map(a => a.contact).find(Boolean);
-  return head(c.name, contact ? `${t.contact}: ${contact}` : '', `<a class="btn" href="#/clientes">${icon('back', 'sm')}${esc(t.back)}</a>`)
+  return head(c.name, contact ? `${t.contact}: ${contact}` : '', `<a class="btn" href="#/clientes">${icon('back', 'sm')}${esc(t.back)}</a> <a class="btn primary" href="#/nuevo/${encodeURIComponent(c.name)}">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`)
     + `<div class="kpis">${kpi(c.checks ? M.fmtPct(c.ok, c.checks) : '—', t.availability)}${kpi(c.P1, t.p1)}${kpi(c.P2, t.p2)}${kpi(devices.length, t.nav.equipos)}</div>`
     + section(t.alertsFor, list(open.filter(a => !a.ack).map(a => alertRow(a, idx, { client: false })), t.nothingUrgent), 'alert')
-    + (sites.length ? section(t.websites, list(sites.map(a => siteRow(a, S)), t.none), 'globe') : '')
+    + section(t.websites, list(c.assets.map(a => siteRow(a, S, { actions: true })), t.none), 'globe')
     + (devices.length ? section(t.nav.equipos, list(devices.map(deviceRow), t.none), 'equipos') : '')
     + (backups.length ? section(t.nav.copias, list(backups.map(backupRow), t.none), 'copias') : '')
+    + maintenanceBlock(S, t, { client: c.name })
     + section(t.report, `<div style="display:flex;gap:8px;flex-wrap:wrap">${reportLinks(c.name, S)}</div>`, 'informes');
 }
 
 // ---------- shell ----------
 // A stable description of the focused control, so it can be found again after a redraw
-const focusId = el => el && el !== document.body ? (el.id ? `#${el.id}` : ['act', 'key', 'k', 'v'].map(k => el.dataset?.[k] ?? '').join('|') + (el.getAttribute?.('href') || '')) : null;
+const focusId = el => el && el !== document.body ? (el.id ? `#${el.id}` : el.dataset?.m ? `m:${el.dataset.m}` : ['act', 'key', 'k', 'v'].map(k => el.dataset?.[k] ?? '').join('|') + (el.getAttribute?.('href') || '')) : null;
 function restoreFocus(id, sel) {
   if (!id) return;
-  const el = id.startsWith('#') ? document.getElementById(id.slice(1)) : [...root.querySelectorAll('button,a,[tabindex],select,input')].find(x => focusId(x) === id);
+  const el = id.startsWith('#') ? document.getElementById(id.slice(1)) : [...root.querySelectorAll('button,a,[tabindex],select,input,summary')].find(x => focusId(x) === id);
   if (!el) return;
   el.focus({ preventScroll: true });
-  if (sel && el.setSelectionRange) el.setSelectionRange(...sel);
+  try { if (sel && el.setSelectionRange) el.setSelectionRange(...sel); } catch {} // not every input type has a caret
 }
 
 function render() {
@@ -213,7 +230,8 @@ function render() {
   // nothing changed: leave the DOM alone (focus, selection and screen-reader position stay intact)
   if (html === ui.html) return;
   ui.html = html;
-  const active = document.activeElement, id = focusId(active), sel = active?.id === 'q' ? [active.selectionStart, active.selectionEnd] : null;
+  const active = document.activeElement, id = focusId(active);
+  let sel = null; try { sel = active && 'selectionStart' in active && active.selectionStart != null ? [active.selectionStart, active.selectionEnd] : null; } catch {}
   root.innerHTML = html;
   restoreFocus(id, sel);
 }
@@ -226,6 +244,8 @@ root.addEventListener('click', async e => {
   if (act === 'ack') { b.disabled = true; try { await api('POST', `/api/ack?key=${encodeURIComponent(b.dataset.key)}`); toast(`${t.acked} ✓`); } catch (err) { toast(err.message); } return refresh(); }
   if (act === 'test') { try { await api('POST', '/api/test'); toast(t.testSent); } catch (err) { toast(err.message); } return; }
   if (act === 'expand') return toggleExpand(b);
+  if (['save', 'row-add', 'row-del', 'asset-del', 'pause'].includes(act)) { e.preventDefault(); if (await editorAction(act, b, { t, toast, go: h => { location.hash = h; }, refresh })) { ui.html = ''; render(); } return; }
+  if (act === 'mt-start' || act === 'mt-end') { e.preventDefault(); return onMaintenanceAction(act, b, ui.S, { t, toast, refresh }); }
   if (act === 'filter') { ui.filter[b.dataset.k] = b.dataset.v; return render(); }
   if (act === 'theme') { const v = b.dataset.v; pref('vigia-theme', v === 'auto' ? null : v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; return render(); }
   if (act === 'lang') { pref('vigia-lang', b.dataset.v === 'auto' ? null : b.dataset.v); return render(); }
@@ -239,8 +259,15 @@ root.addEventListener('keydown', e => {
   const b = e.target.closest?.('[data-act="expand"]');
   if (b && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleExpand(b); }
 });
-root.addEventListener('change', e => { if (e.target.dataset.act === 'client') { ui.filter.client = e.target.value; render(); } });
-root.addEventListener('input', e => { if (e.target.id === 'q') { ui.filter.q = e.target.value; render(); } });
+root.addEventListener('submit', e => e.preventDefault()); // the editor is a <form> only for semantics and Enter; saving goes through the API
+root.addEventListener('change', e => {
+  if (e.target.dataset.act === 'client') { ui.filter.client = e.target.value; return render(); }
+  if (editorInput(e.target) || onMaintenanceInput(e.target)) render();
+});
+root.addEventListener('input', e => {
+  if (e.target.id === 'q') { ui.filter.q = e.target.value; return render(); }
+  if (e.target.type !== 'checkbox' && e.target.tagName !== 'SELECT' && (editorInput(e.target) || onMaintenanceInput(e.target))) render();
+});
 window.addEventListener('hashchange', () => { ui.html = ''; render(); window.scrollTo(0, 0); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

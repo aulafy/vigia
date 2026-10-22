@@ -43,6 +43,7 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
 | 60 s | **Self-health:** stale feeds, checks that keep failing for one asset or feed (coverage), alert channels, disk, and an outgoing heartbeat to an external service | P2 (disk: P1), or the external service pages you |
 | daily | **Digest** of open P2s and new P3s | one message |
+| any time | **Maintenance windows** for an asset, a client or everything | Alerts are kept but not sent; still-open ones go out when the window ends |
 
 ## Why it stays quiet
 
@@ -67,22 +68,27 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 Requires Node.js 20 or newer. There is nothing to install.
 
 ```bash
-git clone https://github.com/aulafy/vigia.git
-cd vigia
-cp .env.example .env              # set at least NTFY_TOPIC
-npm start                         # dashboard on http://localhost:4848
-npm run demo                      # or: try it first with demo clients (nothing is written to data/)
+# Docker (published image, amd64 and arm64)
+mkdir vigia && cd vigia
+curl -fsSLO https://raw.githubusercontent.com/aulafy/vigia/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/aulafy/vigia/main/.env.example -o .env   # set NTFY_TOPIC and DASH_PASS
+docker compose up -d                                                                 # dashboard on 127.0.0.1:4848
+
+# or from source (Node 20+, nothing to install)
+git clone https://github.com/aulafy/vigia.git && cd vigia
+cp .env.example .env && npm start
+npm run demo                      # try it first with demo clients (nothing is written to data/)
 ```
 
 1. Install the **[ntfy](https://ntfy.sh)** app (iOS/Android) and subscribe to the topic you put in `NTFY_TOPIC`. Pick a long random name: anyone who knows a topic on the public ntfy.sh server can read it.
 2. Open the dashboard and press **Send test alert**. Your phone should ring.
-3. On the first run Vigía copies `inventory.example.json` to `data/inventory.json`. Edit that file to describe your clients (see below). Vigía picks up every change without a restart.
+3. Add your clients from the dashboard (**Clients → Add asset**), or edit `data/inventory.json` directly (see below). Vigía picks up every change without a restart.
 4. Create a free check on [healthchecks.io](https://healthchecks.io) and put its ping URL in `HEARTBEAT_URL`.
 5. Deploy it somewhere that is always on and **is not one of the servers it watches**. See [docs/deployment.md](docs/deployment.md).
 
 ## The inventory
 
-Everything depends on the inventory. You can write it by hand, let each server **push** what it runs ([docs/inventory-push.md](docs/inventory-push.md)), or both. Without it you would get hundreds of CVEs a day with no way to know which ones matter. With it, Vigía alerts only on the ones that affect you.
+Everything depends on the inventory. You can fill it in from the dashboard, write it by hand, let each server **push** what it runs ([docs/inventory-push.md](docs/inventory-push.md)), or both. Without it you would get hundreds of CVEs a day with no way to know which ones matter. With it, Vigía alerts only on the ones that affect you.
 
 ```json
 [
@@ -133,7 +139,7 @@ Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented 
 
 ## Dashboard
 
-A web app you can install on your phone, in light or dark mode, with seven sections: **Today, Alerts, Clients, Devices, Backups, Reports, Settings**. Acknowledge a P1 from the phone, open a client to see everything about it, and print its monthly report. Try it with `npm run demo`. See **[docs/dashboard.md](docs/dashboard.md)**.
+A web app you can install on your phone, in light or dark mode, with seven sections: **Today, Alerts, Clients, Devices, Backups, Reports, Settings**. Acknowledge a P1 from the phone, open a client to see everything about it, **add and edit assets, devices and backup jobs without touching JSON**, schedule **maintenance windows**, and print the monthly report. Try it with `npm run demo`. See **[docs/dashboard.md](docs/dashboard.md)**.
 
 ## Monthly client reports
 
@@ -193,6 +199,8 @@ All settings are environment variables, which can live in `.env`:
 | `POST /api/inventory/<asset>` | HMAC signature | Inventory push, see [docs/inventory-push.md](docs/inventory-push.md#protocol) |
 | `GET /api/reports` | dashboard | Clients and months available for reports |
 | `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
+| `GET /api/inventory`, `POST /api/assets`, `PUT/DELETE /api/assets/<id>`, `POST /api/assets/<id>/pause` | dashboard | Edit the inventory. Every write sends the revision it started from (`409` if the file changed meanwhile) and keeps a copy in `data/inventory-history/` |
+| `GET/POST /api/maintenance`, `DELETE /api/maintenance/<id>` | dashboard | Maintenance windows |
 | `POST /api/test` | dashboard | Send a test P1 to every channel. Answers `400` with no channel configured and `502` if none delivered it |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
@@ -236,7 +244,7 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 - Ubuntu USN and Debian DSA advisory feeds
 - Lower memory use for the Wordfence feed, and faster uptime rounds beyond 1,000 assets
 - Importing monitors from Uptime Kuma
-- Maintenance windows and per-client quiet hours
+- Per-client quiet hours (recurring maintenance windows)
 
 ## Data sources
 

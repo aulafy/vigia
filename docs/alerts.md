@@ -93,6 +93,17 @@ The channels can all work and you can still miss alerts: the app was uninstalled
 - **Disk:** if `state.json` cannot be written, Vigía raises a P1. Alerts and acknowledgements would otherwise be lost on restart.
 - **`/healthz`:** an unauthenticated liveness endpoint for Docker, systemd watchdogs or a load balancer.
 
+## Maintenance windows
+
+Before planned work (an update, a migration, a hardware swap), schedule a window from the client's page or from Settings: for one asset, a whole client, or everything. A window lasts up to 7 days.
+
+While it is active:
+- alerts for the covered assets are **recorded but not sent**, and P1s do not repeat;
+- availability probes are not counted, so planned downtime does not lower the monthly figure;
+- a problem fixed during the window (for example a site that was down during the upgrade) closes **quietly**.
+
+When the window ends, or when you press **End now**, every alert that is still open goes out once, marked "(after maintenance)". A window for *everything* also mutes Vigía's own alerts (feeds, coverage), which is useful while you work on the Vigía host itself. Windows are listed on Today and in each client's monthly report.
+
 ## Daily digest
 
 Every day at `DIGEST_HOUR` (time zone `DIGEST_TZ`), Vigía sends one message listing the open P2s you have not acknowledged and the P3s created since the last digest that went out. If there is nothing, it sends nothing; if sending fails, it tries again a few minutes later. A fresh install skips its first day, so it does not open with a digest, but what it finds from its first minute is in the next one.

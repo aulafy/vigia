@@ -97,6 +97,54 @@ test('test alert tells the truth about delivery', async () => {
   assert.equal((await r.json()).sent, 1);
 });
 
+
+test('editing the inventory: create, validation, conflict, history copy, delete', async () => {
+  const H = { ...auth, 'content-type': 'application/json' };
+  let inv = await (await fetch(url('/api/inventory'), { headers: auth })).json();
+  assert.ok(inv.rev && inv.edgeTypes.some(e => e.type === 'fortigate'));
+  let r = await fetch(url('/api/assets'), { method: 'POST', headers: H, body: JSON.stringify({ rev: inv.rev, asset: { id: 'Bad ID', client: '' } }) });
+  assert.equal(r.status, 422);
+  assert.deepEqual((await r.json()).errors.map(e => e.code), ['idFormat', 'required', 'needTarget']);
+  r = await fetch(url('/api/assets'), { method: 'POST', headers: H, body: JSON.stringify({ rev: inv.rev, asset: { id: 'blog', client: 'ACME', domain: 'blog.example.com', name: '', stack: [] } }) });
+  assert.equal(r.status, 201);
+  const { rev } = await r.json();
+  const stale = await fetch(url('/api/assets/blog'), { method: 'PUT', headers: H, body: JSON.stringify({ rev: inv.rev, asset: { id: 'blog', client: 'ACME', domain: 'blog.example.com' } }) });
+  assert.equal(stale.status, 409, 'an edit based on an old revision never overwrites');
+  r = await fetch(url('/api/assets/blog'), { method: 'PUT', headers: H, body: JSON.stringify({ rev, asset: { id: 'renamed', client: 'ACME', domain: 'blog.example.com' } }) });
+  assert.equal(r.status, 422, 'ids are immutable');
+  const file = JSON.parse(fs.readFileSync(path.join(dir, 'inventory.json'), 'utf8'));
+  assert.deepEqual(file.find(a => a.id === 'blog'), { id: 'blog', client: 'ACME', domain: 'blog.example.com' }, 'empty fields are not written');
+  assert.ok(fs.readdirSync(path.join(dir, 'inventory-history')).length >= 1, 'the previous file is kept');
+  r = await fetch(url('/api/assets/blog?x'), { method: 'DELETE', headers: H, body: JSON.stringify({ rev }) });
+  assert.equal(r.status, 200);
+  assert.equal(await fetch(url('/api/assets/blog'), { method: 'DELETE', headers: { authorization: auth.authorization } }).then(x => x.status), 403, 'CSRF header required for DELETE too');
+});
+
+test('maintenance windows: alerts wait until the window ends', async () => {
+  const H = { ...auth, 'content-type': 'application/json' };
+  // a dedicated asset with its own backup job, so no alert from earlier tests interferes
+  const inv = await (await fetch(url('/api/inventory'), { headers: auth })).json();
+  assert.equal((await fetch(url('/api/assets'), { method: 'POST', headers: H, body: JSON.stringify({ rev: inv.rev, asset: { id: 'nas', client: 'ACME', domain: 'nas.example.com', criticality: 'high', backups: [{ id: 'nightly' }] } }) })).status, 201);
+  const now = Date.now();
+  let r = await fetch(url('/api/maintenance'), { method: 'POST', headers: H, body: JSON.stringify({ from: new Date(now - 60_000).toISOString(), to: new Date(now + 3600_000).toISOString(), client: 'Nobody' }) });
+  assert.equal(r.status, 422);
+  r = await fetch(url('/api/maintenance'), { method: 'POST', headers: H, body: JSON.stringify({ from: new Date(now - 60_000).toISOString(), to: new Date(now + 3600_000).toISOString(), assets: ['nas'], reason: 'disk swap' }) });
+  assert.equal(r.status, 201);
+  const { window: w } = await r.json();
+  const before = hooks.length, key = crypto.createHmac('sha256', MASTER).update('vigia-asset:nas').digest('hex');
+  const p = '/api/backup/nas/nightly?status=fail', body = '{"message":"NAS offline for the swap"}', ts = Math.floor(Date.now() / 1000);
+  assert.equal((await fetch(url(p), { method: 'POST', headers: { 'x-vigia-timestamp': String(ts), 'x-vigia-signature': sign(key, ts, p, body) }, body })).status, 200);
+  await new Promise(res => setTimeout(res, 800));
+  const st = await (await fetch(url('/api/state'), { headers: auth })).json();
+  assert.ok(st.alerts.find(a => a.key === 'backup:failed:nas/nightly')?.muted, 'kept, marked as muted');
+  assert.equal(hooks.slice(before).filter(h => /nightly/.test(h.title)).length, 0, 'nothing sent during maintenance');
+  assert.equal((await fetch(url(`/api/maintenance/${w.id}`), { method: 'DELETE', headers: H })).status, 200);
+  let got;
+  for (let i = 0; i < 60 && !(got = hooks.slice(before).find(h => /after maintenance/.test(h.title) && /nightly/.test(h.title))); i++) await new Promise(res => setTimeout(res, 100));
+  assert.ok(got, 'sent when the window ended');
+});
+
+// last: it blocks this address for 10 minutes
 test('ten wrong passwords block the address for a while', async () => {
   const bad = { authorization: `Basic ${Buffer.from('vigia:nope').toString('base64')}` };
   for (let i = 0; i < 10; i++) await fetch(url('/api/state'), { headers: bad });

@@ -108,3 +108,19 @@ test('app shell: manifest, icons and service worker list real files', () => {
   const app = fs.readFileSync(new URL('app.js', pub), 'utf8');
   for (const [, name] of app.matchAll(/icon\('([a-z]+)'/g)) assert.ok(ICONS.includes(name), `icon ${name}`);
 });
+
+test('editor and maintenance helpers', () => {
+  const now = Date.parse('2026-10-23T10:00:00Z'), iso = h => new Date(now + h * 3600_000).toISOString();
+  const S2 = { ...S, maintenance: [{ id: 'w1', from: iso(1), to: iso(2), assets: ['shop'] }, { id: 'w2', from: iso(-1), to: iso(1), client: 'Dental', reason: 'upgrade' }] };
+  const mv = M.maintenanceView(S2, now);
+  assert.deepEqual(mv.map(w => [w.id, w.active, w.covers]), [['w2', true, 'Dental'], ['w1', false, 'Shop']]);
+  assert.ok(M.assetInMaintenance(S2, S.inventory[3], now));
+  assert.ok(!M.assetInMaintenance(S2, S.inventory[0], now));
+  assert.equal(M.stackKind({ wp: 'plugin' }), 'wp');
+  assert.equal(M.stackKind({ _kind: 'eol' }), 'eol');
+  assert.deepEqual(M.cleanDraft({ id: 'a', name: '', paused: false, stack: [{ _kind: 'pkg', ecosystem: 'npm', name: 'x', version: '1' }], edge: [], n: 0 }),
+    { id: 'a', stack: [{ ecosystem: 'npm', name: 'x', version: '1' }], n: 0 });
+  const t = M.strings('es');
+  assert.equal(M.errText({ code: 'range', min: 1, max: 10 }, t), 'Entre 1 y 10');
+  assert.equal(M.errText({ code: 'oneOf', values: ['A', 'AAAA'] }, M.strings('en')), 'Must be one of: A, AAAA');
+});

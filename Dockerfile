@@ -1,4 +1,5 @@
 FROM node:22-alpine
+LABEL org.opencontainers.image.source=https://github.com/aulafy/vigia
 WORKDIR /app
 COPY package.json server.mjs lib.mjs alerts.mjs i18n.mjs report.mjs inventory.example.json ./
 COPY public ./public

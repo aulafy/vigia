@@ -11,12 +11,18 @@ Whatever you choose, configure `HEARTBEAT_URL` so that you hear about it when Vi
 
 ## Docker Compose (recommended)
 
+The image is published on GHCR for amd64 and arm64: `ghcr.io/aulafy/vigia` (tags `latest`, `0.10`, `0.10.0`…). You only need two files:
+
 ```bash
-git clone https://github.com/aulafy/vigia.git && cd vigia
-cp .env.example .env && nano .env
+mkdir vigia && cd vigia
+curl -fsSLO https://raw.githubusercontent.com/aulafy/vigia/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/aulafy/vigia/main/.env.example -o .env
+nano .env                 # NTFY_TOPIC, DASH_PASS, HEARTBEAT_URL, CHECKIN_SECRET…
 docker compose up -d
 docker compose logs -f
 ```
+
+To pin a version, use `image: ghcr.io/aulafy/vigia:0.10` in `docker-compose.yml`. To build from source instead, clone the repository and replace the `image:` line with `build: .`.
 
 Set `DASH_PASS` in `.env` first: inside the container Vigía listens on all interfaces, and it refuses to start without a password there. State and inventory live in `./data` on the host. The dashboard is published on `127.0.0.1:4848` only. Reach it through an SSH tunnel:
 
@@ -63,7 +69,7 @@ Alternatives without opening ports: Tailscale (private network), Tailscale Funne
 ## Updating
 
 ```bash
-git pull && docker compose up -d --build      # Docker
+docker compose pull && docker compose up -d   # Docker (published image)
 git pull && sudo systemctl restart vigia      # systemd
 ```
 
@@ -78,6 +84,7 @@ Back up the whole `data/` folder:
 | File | Contains | If lost |
 |---|---|---|
 | `inventory.json` | Your clients and what they run | **Your source of truth: restore it** |
+| `inventory-history/` | The last 20 versions of `inventory.json`, one per edit from the dashboard | Only past versions are lost |
 | `state.json` | Alerts, acknowledgements, accepted baselines (DNS, scripts, registrar…), incident history and availability | Vigía starts over: every asset is onboarded again, accepted changes are forgotten, and **past months can no longer be reported** |
 | `pushed.json` | Inventories pushed by servers | Rebuilt by the next push |
 | `wordfence.json` | Wordfence feed cache | Downloaded again |

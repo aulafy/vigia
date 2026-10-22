@@ -103,6 +103,19 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:var(
 @keyframes pulse{50%{opacity:.5}}
 
 /* phone: bottom tab bar instead of the sidebar */
+/* editor and maintenance forms */
+.editor .section,.mtform{margin-top:6px}
+.grid2,.grid3,.grid4{display:grid;gap:12px 14px}.grid2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.fld{display:flex;flex-direction:column;gap:4px;min-width:0;border:0;padding:0;margin:0}.fld>span,.fld legend{font-size:12.5px;font-weight:600;color:var(--ink-2)}.fld.wide{grid-column:1/-1}
+.fld input:not([type=checkbox]),.fld select{width:100%;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 10px;min-height:38px}
+.fld input[readonly]{background:var(--surface-2);color:var(--muted)}.fld input[aria-invalid=true],.fld select[aria-invalid=true]{border-color:var(--red);box-shadow:0 0 0 1px var(--red)}
+.fld.check{flex-direction:row-reverse;justify-content:flex-end;align-items:center;gap:8px}.fld.check>span{font-weight:500}
+.fld .hint{color:var(--muted);font-size:12px}.fld .err{color:var(--red);font-size:12px;font-weight:600}
+.tick{display:inline-flex;align-items:center;gap:6px;font-size:13px;margin-right:12px}.chips{display:flex;flex-wrap:wrap;gap:4px 0}
+.rowbox{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px;margin-bottom:10px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}.rowbox>div{width:100%}
+details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}details>summary h2{display:inline-flex}
+.btn.ghost{border-color:transparent;color:var(--red)}.danger{border-top:1px solid var(--line);padding-top:14px;margin-top:20px}
+.actions{display:flex;gap:8px}.rowacts{display:flex;gap:6px;margin-top:4px}.mtform{margin-top:10px}
 @media (max-width:860px){
   .app,.boot{grid-template-columns:1fr}.side,.boot aside{display:none}
   main{padding:18px 16px calc(84px + env(safe-area-inset-bottom))}
@@ -112,6 +125,7 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:var(
   .tabbar a[aria-current="page"]{color:var(--accent);font-weight:600}
   .tabbar .badge{position:absolute;top:0;left:calc(50% + 6px);margin:0;min-width:18px;line-height:18px;font-size:10px}
   .row{padding:12px 14px}.row .side-r{min-width:0}
+  .grid2,.grid3,.grid4{grid-template-columns:1fr}
   .btn{min-height:44px}.btn.small{min-height:40px;padding:6px 12px}.seg button{min-height:40px}.tabbar a{min-height:48px;justify-content:center}
   .row.alert{flex-wrap:wrap}.row.alert .main{flex-basis:calc(100% - 48px)}.row.alert .side-r{flex-basis:100%;flex-direction:row;justify-content:flex-end;margin-top:-2px}
   .hero{padding:16px}.hero h2{font-size:18px}

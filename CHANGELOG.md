@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.0 — 2026-10-23
+
+### Added
+- **Edit clients from the dashboard.** Add, edit, pause and delete assets with their software, firewalls/VPNs and backup jobs, with no JSON involved. The form validates as you type, with the same rules the server enforces (`public/validate.js`, shared), and proposes an ID from the client and name. Every save checks the revision the form started from, so a hand edit of `inventory.json` in the meantime is never overwritten: you get a warning and your changes are kept. The previous file is kept in `data/inventory-history/` (last 20), writes are atomic, and an unreadable `inventory.json` cannot be edited from the dashboard until it is fixed. IDs cannot change, because alerts and history use them.
+- **Maintenance windows** for an asset, a whole client or everything, from the client page or Settings: 1/2/4/8 hours, until 08:00 tomorrow, or custom (up to 7 days). During a window, alerts for those assets are recorded but not sent, P1s do not repeat, and planned downtime does not count against availability. Whatever is still wrong when the window ends is sent then, marked "(after maintenance)", and what got fixed during the window is closed quietly. Windows appear on Today and in the client's monthly report.
+- **Docker image on GHCR** for amd64 and arm64: `ghcr.io/aulafy/vigia`, tagged `latest`, `0.10` and `0.10.0`. `docker-compose.yml` now uses it. **Releases**: every version tag runs the tests, publishes the image and creates a GitHub release with the notes from this changelog.
+- API: `GET /api/inventory`, `POST /api/assets`, `PUT|DELETE /api/assets/<id>`, `POST /api/assets/<id>/pause`, `GET|POST /api/maintenance`, `DELETE /api/maintenance/<id>`.
+
+### Changed
+- Dashboard actions with `PUT` and `DELETE` require the `x-vigia-ui` header too (CSRF).
+- The client page lists every asset, device-only ones included, with Edit and Pause buttons.
+- Focus and cursor survive redraws in every text field, not only in search.
+
 ## 0.9.0 — 2026-10-23
 
 Driven by two external reviews: a code review by Codex (bugs, scale, security, UX) and research by Grok (how edge zero-days actually surface).

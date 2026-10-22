@@ -1,5 +1,7 @@
 # Inventory reference
 
+You can edit the inventory from the dashboard (**Clients → Add asset**, or **Edit** on any asset; see [dashboard.md](dashboard.md#editing-assets)) or by hand. This page documents the file itself, which is what the dashboard writes.
+
 The inventory is a JSON array in `data/inventory.json` (or the file set in `VIGIA_INV`). Each element is one **asset**: usually a website, but it can be any HTTPS endpoint, such as an API, a client portal or a VPN login page.
 
 Vigía picks up every change to the file without a restart. Invalid entries are skipped and raise a P2 listing the problems, and the rest keep working. A file that does not parse at all never empties the inventory: Vigía keeps using the last valid copy and raises a P2 until it is fixed.

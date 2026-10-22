@@ -13,7 +13,7 @@ export const ONBOARD_GRACE_MS = 3600_000;     // findings of an onboarding that 
  * notify(prio, title, body, key) → Promise<{ sent, failed, total }>
  * Every P1/P2 alert keeps `deliveredAt` until a channel confirmed it, so a crash or an outage never loses one silently.
  */
-export function createAlerts({ state, T, notify, applyAccept, now = () => Date.now(), save = () => {} }) {
+export function createAlerts({ state, T, notify, applyAccept, now = () => Date.now(), save = () => {}, isMuted = () => false }) {
   state.alerts ||= {}; state.history ||= []; state.groups ||= {}; state.scanned ||= {};
   const queue = new AsyncLocalStorage();
   const onboarding = {}; // kind -> Set(assetId) while that kind's first scan runs
@@ -67,7 +67,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
   function escalate(a, prio, title) {
     Object.assign(a, { prio, ack: false, sentAt: now(), deliveredAt: null });
     histNote(a, { prio });
-    send(prio, title, a.body, a.key);
+    if (isMuted(a.asset)) a.muted = true; else send(prio, title, a.body, a.key);
   }
 
   // raise: create (deduplicated by key) or update an alert. A worse priority re-pages: the old acknowledgement no longer covers it.
@@ -78,7 +78,8 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
     if (!a) {
       const al = state.alerts[key] = { key, prio, title, body, asset, first: t, sentAt: t, ack: false, deliveredAt: null, ...(accept && { accept }), ...extra };
       state.history.push({ key, prio, title, asset, first: t });
-      if (inOnboarding(key, asset)) al.onb = t; // summarised by onboard(), not paged one by one
+      if (isMuted(asset)) al.muted = true;        // maintenance window: kept, sent when the window ends if still open
+      else if (inOnboarding(key, asset)) al.onb = t; // summarised by onboard(), not paged one by one
       else send(prio, title, body, key);
       return al;
     }
@@ -92,7 +93,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
     if (!a) return;
     delete state.alerts[key];
     histNote(a, { resolvedAt: now() });
-    if (!quiet && a.prio !== 'P3') send('P2', T.recovered(a.title), msg || '');
+    if (!quiet && !a.muted && a.prio !== 'P3') send('P2', T.recovered(a.title), msg || ''); // nothing to recover from if it was never sent
   }
 
   function ack(key) {
@@ -127,7 +128,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
       delete onboarding[kind];
       if (!fresh.size) return;
       for (const id of fresh) state.scanned[`${kind}:${id}`] = now();
-      summarize(kind, Object.values(state.alerts).filter(a => a.onb && fresh.has(a.asset) && a.key.startsWith(`${kind}:`)), inv);
+      summarize(kind, Object.values(state.alerts).filter(a => a.onb && !a.muted && fresh.has(a.asset) && a.key.startsWith(`${kind}:`)), inv);
     }, e => { delete onboarding[kind]; throw e; });
   }
 
@@ -145,6 +146,12 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
   function sweep(t = now()) {
     const leftovers = [];
     for (const a of Object.values(state.alerts)) {
+      if (a.muted) {
+        if (isMuted(a.asset)) continue;
+        delete a.muted; // the window is over and the problem is still there: now it is news
+        if (!a.ack && a.prio !== 'P3') { a.sentAt = t; send(a.prio, T.afterMaintenance(a.title), a.body, a.key); }
+        continue;
+      }
       if (a.ack || a.prio === 'P3') continue;
       if (a.onb) {
         if (a.prio === 'P1' && t - a.onb > REPEAT_P1_MS) delete a.onb; // a P1 never waits long for a summary

@@ -10,6 +10,7 @@ import { Resolver } from 'node:dns/promises';
 import crypto from 'node:crypto';
 import * as L from './lib.mjs';
 import { createAlerts } from './alerts.mjs';
+import { validateAsset, validateWindow, inWindow } from './public/validate.js';
 import { messages } from './i18n.mjs';
 import { renderReport, previousMonth, monthRange } from './report.mjs';
 
@@ -53,7 +54,7 @@ if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'
 
 // domain / dns / web hold the baselines that change alerts compare against
 let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
-  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {} };
+  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {}, maintenance: [] };
 if (fs.existsSync(STATE_F)) {
   try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; }
   catch (e) {
@@ -200,7 +201,10 @@ async function notify(prio, title, body, key) {
 }
 
 // ---------- Alert lifecycle (alerts.mjs: raise, escalate, group, deliver, retry) ----------
-const alerts = createAlerts({ state, T, notify, applyAccept: L.applyAccept, save });
+// Maintenance windows mute notifications for the assets they cover (an "all" window also mutes Vigía's own alerts)
+const assetById = id => inv$.assets.find(a => a.id === id);
+const muted = assetId => (assetId ? inWindow(state.maintenance, assetById(assetId) || { id: assetId }) : (state.maintenance || []).some(w => w.all && Date.parse(w.from) <= Date.now() && Date.now() < Date.parse(w.to)));
+const alerts = createAlerts({ state, T, notify, applyAccept: L.applyAccept, save, isMuted: muted });
 const { raise, resolve, send, onboard, histNote } = alerts;
 const ackAlert = key => alerts.ack(key);
 const monthOf = (t = Date.now()) => L.localClock(DIGEST_TZ, new Date(t)).day.slice(0, 7);
@@ -233,8 +237,7 @@ async function checkAsset(a) {
     if (!ok && !why) why = `HTTP ${code}`;
   } catch (e) { why = e.cause?.code || e.name || e.message; }
   Object.assign(st, { ms: Date.now() - t0, code, checkedAt: Date.now() });
-  const av = ((state.avail[a.id] ||= {})[monthOf()] ||= [0, 0]);
-  av[0]++; if (ok) av[1]++;
+  if (!muted(a.id)) { const av = ((state.avail[a.id] ||= {})[monthOf()] ||= [0, 0]); av[0]++; if (ok) av[1]++; }
   const key = `down:${a.id}`;
   st.lastProbeOk = ok;
   if (ok) { st.fails = 0; st.ok = true; resolve(key, T.up(a, st.ms)); }
@@ -782,6 +785,95 @@ async function inventoryPush(req, u) {
     wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), errors }];
 }
 
+// ---------- Inventory editing from the dashboard ----------
+// Every write checks the revision the editor started from (a hand edit in between is never overwritten),
+// keeps the previous file in data/inventory-history/ (last 20) and is atomic.
+const INV_HISTORY = path.join(path.dirname(INV), 'inventory-history');
+const LEGACY = ['cliente', 'criticidad', 'contacto'];
+function readInventoryFile() {
+  const text = fs.readFileSync(INV, 'utf8'), list = JSON.parse(text);
+  if (!Array.isArray(list)) throw new Error('inventory.json must be a JSON array');
+  return { list, rev: shortHash(text) };
+}
+function writeInventoryFile(list) {
+  fs.mkdirSync(INV_HISTORY, { recursive: true });
+  try { fs.copyFileSync(INV, path.join(INV_HISTORY, `inventory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)); } catch {}
+  for (const f of fs.readdirSync(INV_HISTORY).sort().slice(0, -20)) fs.rmSync(path.join(INV_HISTORY, f), { force: true });
+  const text = `${JSON.stringify(list, null, 2)}\n`;
+  writeAtomic(INV, text);
+  inventory(); // pick the change up now, not at the next cycle
+  return shortHash(text);
+}
+// Drop empty optional fields and legacy Spanish names, so the file stays readable
+const empty = v => v === '' || v == null || v === false || (Array.isArray(v) && !v.length);
+function tidy(a, depth = 0) {
+  const out = {};
+  for (const [k, v] of Object.entries(a || {})) {
+    if ((depth === 0 && LEGACY.includes(k)) || empty(v)) continue;
+    // devices, backup jobs and software rows are tidied too; a row left completely empty is dropped
+    out[k] = Array.isArray(v) && depth === 0 ? v.map(x => (x && typeof x === 'object' && !Array.isArray(x) ? tidy(x, 1) : x)).filter(x => !(x && typeof x === 'object' && !Object.keys(x).length)) : v;
+    if (Array.isArray(out[k]) && !out[k].length) delete out[k];
+  }
+  return out;
+}
+const edgeTypes = Object.keys(L.EDGE);
+async function editInventory(req, u) {
+  let file;
+  try { file = readInventoryFile(); } catch (e) { return [409, { error: 'inventoryBroken', detail: e.message }]; }
+  if (req.method === 'GET') return [200, { rev: file.rev, assets: file.list, edgeTypes: Object.entries(L.EDGE).map(([type, c]) => ({ type, label: c.label })) }];
+  let body = {};
+  try { body = JSON.parse((await readBody(req, 256 * 1024)) || '{}'); } catch { return [400, { error: 'badJson' }]; }
+  if (body.rev !== file.rev) return [409, { error: 'conflict', rev: file.rev }];
+  const [, , , id, action] = u.pathname.split('/').map(decodeURIComponent);
+  const ids = file.list.map(a => a.id), i = ids.indexOf(id);
+  if (req.method === 'POST' && !id) {
+    const asset = tidy(body.asset || {}), errors = validateAsset(asset, { ids, creating: true, edgeTypes });
+    if (errors.length) return [422, { error: 'invalid', errors }];
+    return [201, { ok: true, rev: writeInventoryFile([...file.list, asset]), id: asset.id }];
+  }
+  if (i < 0) return [404, { error: 'unknownAsset' }];
+  if (req.method === 'POST' && action === 'pause') {
+    const list = [...file.list];
+    list[i] = tidy({ ...list[i], paused: !!body.paused });
+    return [200, { ok: true, rev: writeInventoryFile(list) }];
+  }
+  if (req.method === 'PUT') {
+    const asset = tidy(body.asset || {});
+    if (asset.id !== id) return [422, { error: 'invalid', errors: [{ field: 'id', code: 'immutable' }] }]; // alerts and history are keyed on it
+    const errors = validateAsset(asset, { ids, edgeTypes });
+    if (errors.length) return [422, { error: 'invalid', errors }];
+    const list = [...file.list]; list[i] = asset;
+    return [200, { ok: true, rev: writeInventoryFile(list) }];
+  }
+  if (req.method === 'DELETE') return [200, { ok: true, rev: writeInventoryFile(file.list.filter(a => a.id !== id)) }];
+  return [405, { error: 'method' }];
+}
+
+// ---------- Maintenance windows ----------
+async function editMaintenance(req, u) {
+  const now = Date.now();
+  state.maintenance = (state.maintenance || []).filter(w => Date.parse(w.to) > now - 864e5); // keep yesterday's for the record
+  if (req.method === 'GET') return [200, { windows: state.maintenance }];
+  const id = decodeURIComponent(u.pathname.split('/')[3] || '');
+  if (req.method === 'DELETE') {
+    const before = state.maintenance.length;
+    state.maintenance = state.maintenance.filter(w => w.id !== id);
+    if (state.maintenance.length === before) return [404, { error: 'unknownWindow' }];
+    save(); runners.health?.(); // alerts kept during the window go out now
+    return [200, { ok: true }];
+  }
+  let w = {};
+  try { w = JSON.parse((await readBody(req, 16 * 1024)) || '{}'); } catch { return [400, { error: 'badJson' }]; }
+  const all = inventory({ includePaused: true });
+  const errors = validateWindow(w, { ids: all.map(a => a.id), clients: clientsOf(all), now });
+  if (errors.length) return [422, { error: 'invalid', errors }];
+  const win = { id: crypto.randomBytes(5).toString('hex'), from: new Date(Date.parse(w.from)).toISOString(), to: new Date(Date.parse(w.to)).toISOString(),
+    ...(w.all ? { all: true } : w.client ? { client: w.client } : { assets: w.assets }), ...(w.reason && { reason: String(w.reason) }), createdAt: new Date(now).toISOString() };
+  state.maintenance.push(win);
+  save();
+  return [201, { ok: true, window: win }];
+}
+
 // ---------- Monthly report per client ----------
 const clientsOf = inv => [...new Set(inv.map(a => a.client).filter(Boolean))].sort();
 // "A&B" and "A B" would share a slug: a short hash keeps every client's file apart
@@ -802,6 +894,7 @@ function reportData(client, month) {
         alerts: [`adv:${a.id}:${x.edgeIndex}:`, `edge:mgmt:${a.id}:${x.edgeIndex}`, `edge:tls:${a.id}:${x.edgeIndex}`].reduce((n, p) => n + openFor(p).length, 0) })),
     })),
     backups: jobsOf(assets).map(({ key }) => ({ key, ...(state.backups[key] || {}), problems: openFor('backup:').filter(x => x.key.endsWith(`:${key}`)).map(x => x.prio) })),
+    maintenance: (state.maintenance || []).filter(w => w.all || w.client === client || (w.assets || []).some(id => ids.has(id))),
   };
 }
 
@@ -1030,7 +1123,7 @@ http.createServer(async (req, res) => {
   if (!authHeader && !dashHosts.has(String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase()))
     return json({ error: 'host not allowed: add it to DASH_HOSTS, or set DASH_PASS' }, 421);
   // Dashboard actions need a header a cross-site form or image cannot send (CSRF on "Accept change")
-  if (req.method === 'POST' && req.headers['x-vigia-ui'] !== '1') return json({ error: 'missing x-vigia-ui header' }, 403);
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers['x-vigia-ui'] !== '1') return json({ error: 'missing x-vigia-ui header' }, 403);
 
   if (u.pathname === '/api/state') return json({
     version: VERSION, lang: VIGIA_LANG, month: monthOf(),
@@ -1040,6 +1133,7 @@ http.createServer(async (req, res) => {
     config: { checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
       canaryDays: +CANARY_DAYS, epss: [+EPSS_P1, +EPSS_P2], digestHour: +DIGEST_HOUR, timeZone: DIGEST_TZ, brand: REPORT_BRAND, inventoryError: inv$.broken },
     status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
+    maintenance: (state.maintenance || []).filter(w => Date.parse(w.to) > Date.now()),
     channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
     pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: state.backups,
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
@@ -1050,6 +1144,11 @@ http.createServer(async (req, res) => {
     if (!r.total) return json({ ok: false, error: 'no alert channel configured' }, 400);
     return r.sent ? json({ ok: true, sent: r.sent, failed: r.failed }) : json({ ok: false, error: `no channel delivered it: ${(r.errors || []).join('; ')}` }, 502);
   }
+  if (u.pathname === '/api/inventory' || u.pathname.startsWith('/api/assets')) {
+    if (u.pathname === '/api/inventory' && req.method !== 'GET') return json({ error: 'method' }, 405);
+    const [code, out] = await editInventory(req, u); return json(out, code);
+  }
+  if (u.pathname === '/api/maintenance' || u.pathname.startsWith('/api/maintenance/')) { const [code, out] = await editMaintenance(req, u); return json(out, code); }
   if (u.pathname === '/api/reports') return json({ clients: clientsOf(inventory({ includePaused: true })), months: [monthOf(), previousMonth(monthOf())] });
   if (u.pathname === '/report') {
     const client = u.searchParams.get('client'), month = u.searchParams.get('month') || monthOf();
