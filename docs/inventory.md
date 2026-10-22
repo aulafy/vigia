@@ -20,6 +20,13 @@ Vigía re-reads the file on every cycle. Invalid entries are skipped and reporte
 | `paused` | no | `true` | Skip every check, for example during a migration. Existing alerts are kept. |
 | `failThreshold` | no (`2`) | `3` | Consecutive failed probes before raising a downtime alert. |
 | `timeoutMs` | no (`10000`) | `20000` | HTTP timeout for the uptime probe. |
+| `registrableDomain` | no | `"empresa.com.es"` | The domain as registered, for the RDAP and NS/MX checks. Vigía works it out from `domain` and knows common suffixes such as `com.es` and `co.uk`. Set it when the guess is wrong. |
+| `domainExpires` | no | `"2027-03-01"` | Expiry date for TLDs without public RDAP (`.es` and others). Without it, Vigía cannot warn you before the domain expires, and says so in the daily digest. |
+| `dnsWatch` | no | `["A", "AAAA"]` | Also watch the host's IP addresses. NS and MX are always watched. |
+| `allowedHosts` | no | `["stripe.com"]` | Foreign domains the page may redirect to or load scripts from. Subdomains are included. |
+| `strictScripts` | no | `true` | A new third-party script becomes P1 instead of P2. |
+| `ignoreKeywords` | no | `["hacked by"]` | Defacement phrases that are legitimate on this site. |
+| `skip` | no | `["content"]` | Checks to turn off for this asset: `domain`, `dns`, `content`. |
 
 The legacy Spanish field names `cliente`, `criticidad` (`alta`/`media`/`baja`) and `contacto` are also accepted.
 
@@ -65,6 +72,34 @@ Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`,
 | OSV advisory, moderate/low/unknown | P3 | P3 |
 | Software already end-of-life | P2 | P3 |
 | Software end-of-life within 90 days | P3 | P3 |
+| Domain expires < 7 days, expired, or suspended (hold, redemption, pending delete) | P1 | P1 |
+| Domain expires < 30 days | P2 | P2 |
+| Domain transfer lock removed | P2 | P2 |
+| Domain registrar changed | P1 | P2 |
+| TLD without RDAP and no `domainExpires` | P3 | P3 |
+| Nameservers (NS) changed | P1 | P2 |
+| Domain does not resolve (NXDOMAIN, twice in a row) | P1 | P1 |
+| MX, A or AAAA records changed | P2 | P2 |
+| Page redirects to a foreign domain (HTTP or meta refresh) | P1 | P2 |
+| Defacement or SEO-spam text on the page | P1 | P2 |
+| New third-party script on the page | P2 (P1 with `strictScripts`) | P2 |
+
+## Domain, DNS and content checks
+
+These three checks need no `stack` entries. They work from `domain` and `url`, and compare against a **baseline**: the first value Vigía sees for that asset.
+
+**Domain (RDAP, every 6 h).** Vigía finds the registry's RDAP server through the [IANA bootstrap file](https://data.iana.org/rdap/dns.json) and reads the expiry date, the status codes and the registrar. RDAP covers all generic TLDs (`.com`, `.net`, `.org`, `.shop`…) and many country TLDs. **`.es` has no public RDAP**, so for `.es` domains set `domainExpires` by hand. Vigía lists every asset where this is missing in the daily digest.
+
+**DNS (every 5 min).** Vigía asks the public resolvers in `DNS_SERVERS` for the NS and MX records of the registrable domain and, if you add `dnsWatch`, for the A/AAAA records of the host. A difference must show up in **two consecutive checks** before it alerts. If the records return to the baseline, the alert closes.
+
+**Content (every 15 min).** Vigía downloads the page at `url` (or `https://domain`) and looks for three things:
+- the final URL after redirects, and any `<meta http-equiv="refresh">`, pointing to a foreign domain;
+- typical defacement and SEO-spam phrases ("hacked by", "defaced by", pharma spam, Indonesian gambling spam such as "slot gacor"), HTML comments included;
+- `<script src>` hosts that belong to another domain and were not in the baseline.
+
+The content check is skipped while the site is down, since the downtime alert already covers it. It only sees the HTML the server sends, not scripts injected later in the browser.
+
+**Accepting a change.** Change alerts (registrar, lock, DNS, redirect, scripts) show an **Accept change** button in the dashboard and in the phone link. Pressing it makes the new value the baseline and closes the alert. If the change was not yours, do not accept it: investigate.
 
 On the very first run, Vigía records the whole KEV catalogue but alerts only on entries added in the last 14 days. After that, every newly added entry is checked.
 

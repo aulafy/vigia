@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import tls from 'node:tls';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Resolver } from 'node:dns/promises';
 import * as L from './lib.mjs';
 import { messages } from './i18n.mjs';
 
@@ -23,17 +24,19 @@ const {
   PORT = 4848, HOST = '127.0.0.1', DASH_PASS, VIGIA_LANG = 'en',
   NTFY_TOPIC, NTFY_SERVER = 'https://ntfy.sh', NTFY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_URL,
   HEARTBEAT_URL, PUBLIC_URL, ACK_SECRET, DIGEST_HOUR = '9', DIGEST_TZ = process.env.TZ_DIGEST || 'Europe/Madrid',
+  DNS_SERVERS = '1.1.1.1,8.8.8.8',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
 const REPEAT_P1_MS = 10 * 60_000;
-const UA = { 'user-agent': 'vigia/0.3 (+https://github.com/aulafy/vigia)' };
+const UA = { 'user-agent': 'vigia/0.4 (+https://github.com/aulafy/vigia)' };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'), INV);
 
-let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {} };
+// domain / dns / web hold the baselines that change alerts compare against
+let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {} };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } catch {}
 // Atomic write: a crash mid-write cannot corrupt the state file
 const save = () => { fs.writeFileSync(STATE_F + '.tmp', JSON.stringify(state, null, 1)); fs.renameSync(STATE_F + '.tmp', STATE_F); };
@@ -83,17 +86,27 @@ async function notify(prio, title, body, key) {
 const onboarding = {}; // kind -> Set(assetId)
 const inOnboarding = (key, asset) => Object.entries(onboarding).some(([k, s]) => key.startsWith(k + ':') && s.has(asset));
 
-// raise: create an alert (deduplicated by key); an unacknowledged P1 is re-sent every 10 minutes
-function raise(key, prio, title, body, asset) {
+// raise: create an alert (deduplicated by key); an unacknowledged P1 is re-sent every 10 minutes.
+// `accept` turns it into a change alert: acknowledging it makes the new value the baseline.
+function raise(key, prio, title, body, asset, accept) {
   const now = Date.now(), a = state.alerts[key];
+  if (accept) body = `${body} ${T.acceptHint}`;
   if (!a) {
-    state.alerts[key] = { key, prio, title, body, asset, first: now, sentAt: now, ack: false };
+    state.alerts[key] = { key, prio, title, body, asset, first: now, sentAt: now, ack: false, ...(accept && { accept }) };
     if (inOnboarding(key, asset)) state.alerts[key].ack = prio !== 'P1'; // P1s still ring
     else notify(prio, title, body, key);
   } else {
-    Object.assign(a, { title, body });
+    Object.assign(a, { title, body }, accept && { accept });
     if (a.prio === 'P1' && !a.ack && now - a.sentAt > REPEAT_P1_MS) { a.sentAt = now; notify(prio, T.repeat(title), body, key); }
   }
+}
+
+function ackAlert(key) {
+  const a = state.alerts[key];
+  if (!a) return;
+  if (a.accept) { L.applyAccept(state, a.accept); delete state.alerts[key]; }
+  else a.ack = true;
+  save();
 }
 
 function resolve(key, msg, { quiet = false } = {}) {
@@ -121,6 +134,7 @@ function onboard(inv, kind, fn) {
     if (!found.length) return;
     const c = { P1: 0, P2: 0, P3: 0 };
     found.forEach(a => c[a.prio]++);
+    if (!c.P1 && !c.P2) return; // P3-only findings wait for the daily digest
     const names = inv.filter(a => found.some(x => x.asset === a.id)).map(a => `${a.client}/${a.name}`).join(', ');
     notify(c.P1 ? 'P1' : 'P2', T.onboard(kind, found.length), T.onboardBody(names, c));
   }, e => { delete onboarding[kind]; throw e; });
@@ -229,6 +243,129 @@ async function checkEOL(inv) {
   if (complete) prune('eol', scanned, found, '');
 }
 
+const skips = (a, check) => (a.skip || []).includes(check);
+const regOf = a => a.registrableDomain || L.registrableDomain(a.domain);
+
+// ---------- Domain registration via RDAP (every 6 h) ----------
+let rdapBoot = null, rdapBootAt = 0;
+async function rdapFor(domain) {
+  if (!rdapBoot || Date.now() - rdapBootAt > 864e5) { rdapBoot = await getJSON('https://data.iana.org/rdap/dns.json'); rdapBootAt = Date.now(); }
+  const base = L.rdapBase(rdapBoot, domain);
+  if (!base) return null; // TLD without public RDAP (e.g. .es)
+  return L.parseRdap(await getJSON(`${base.replace(/\/?$/, '/')}domain/${encodeURIComponent(domain)}`, { headers: { ...UA, accept: 'application/rdap+json' } }));
+}
+
+async function checkDomains(inv) {
+  const cache = {};
+  let ok = 0, failed = 0, lastErr = '';
+  for (const a of inv) {
+    if (!a.domain || skips(a, 'domain')) continue;
+    const d = regOf(a), base = state.domain[a.id] ||= {};
+    let info;
+    try { info = d in cache ? cache[d] : (cache[d] = await rdapFor(d)); ok++; }
+    catch (e) { failed++; lastErr = e.message; continue; }
+
+    const expires = info?.expires || a.domainExpires || null;
+    if (!expires) raise(`domain:nordap:${a.id}`, 'P3', T.noRdap(a, d), T.noRdapBody(d), a.id);
+    else resolve(`domain:nordap:${a.id}`, '', { quiet: true });
+    const days = L.daysUntil(expires), p = L.domainExpiryPriority(days);
+    if (p) raise(`domain:exp:${a.id}`, p, T.domainExpiring(a, d, days), T.domainExpiringBody(a, expires.slice(0, 10)), a.id);
+    else resolve(`domain:exp:${a.id}`, T.domainRenewed);
+    if (!info) continue;
+
+    if (info.hold.length) raise(`domain:hold:${a.id}`, 'P1', T.domainHold(a, d), T.domainHoldBody(a, info.hold), a.id);
+    else resolve(`domain:hold:${a.id}`, '');
+
+    // Baselines: the first observation is trusted, later differences alert
+    if (base.locked === undefined || info.locked) { base.locked = info.locked; resolve(`domain:lock:${a.id}`, '', { quiet: true }); }
+    else if (base.locked && !info.locked) raise(`domain:lock:${a.id}`, 'P2', T.domainUnlocked(a, d), T.domainUnlockedBody(a), a.id, { path: ['domain', a.id, 'locked'], set: false });
+
+    if (info.registrar) {
+      if (!base.registrar || base.registrar.toLowerCase() === info.registrar.toLowerCase()) { base.registrar = info.registrar; resolve(`domain:registrar:${a.id}`, '', { quiet: true }); }
+      else raise(`domain:registrar:${a.id}`, L.downPriority(a.criticality), T.domainRegistrar(a, d), T.domainRegistrarBody(a, base.registrar, info.registrar), a.id,
+        { path: ['domain', a.id, 'registrar'], set: info.registrar });
+    }
+  }
+  if (failed && !ok) throw new Error(lastErr);
+  state.feeds.domainPartialErr = failed ? lastErr : null;
+}
+
+// ---------- DNS against a baseline (every 5 min) ----------
+const resolver = new Resolver({ timeout: 5000, tries: 2 });
+resolver.setServers(DNS_SERVERS.split(',').map(s => s.trim()).filter(Boolean));
+
+async function lookup(type, name) {
+  try {
+    const r = type === 'NS' ? await resolver.resolveNs(name)
+      : type === 'MX' ? (await resolver.resolveMx(name)).map(x => x.exchange)
+      : type === 'AAAA' ? await resolver.resolve6(name) : await resolver.resolve4(name);
+    return L.normRecords(r);
+  } catch (e) {
+    if (e.code === 'ENODATA') return [];
+    if (e.code === 'ENOTFOUND') return null; // NXDOMAIN
+    throw e;
+  }
+}
+
+async function checkDNS(inv) {
+  let ok = 0, failed = 0, lastErr = '';
+  for (const a of inv) {
+    if (!a.domain || skips(a, 'dns')) continue;
+    const d = regOf(a), base = state.dns[a.id] ||= {}, pend = base._pending ||= {};
+    // NS and MX of the registrable domain always; A/AAAA of the host only when asked (CDNs rotate IPs)
+    for (const t of [...new Set(['NS', 'MX', ...(a.dnsWatch || []).map(x => String(x).toUpperCase())])]) {
+      if (!['NS', 'MX', 'A', 'AAAA'].includes(t)) continue;
+      const name = t === 'NS' || t === 'MX' ? d : a.domain;
+      let cur;
+      try { cur = await lookup(t, name); ok++; } catch (e) { failed++; lastErr = `${name} ${t}: ${e.code || e.message}`; continue; }
+      if (t === 'NS') {
+        if (cur === null) { pend.nx = (pend.nx || 0) + 1; if (pend.nx >= 2) raise(`dns:nx:${a.id}`, 'P1', T.dnsNx(a, d), T.dnsNxBody(a), a.id); continue; }
+        pend.nx = 0;
+        resolve(`dns:nx:${a.id}`, '');
+      }
+      if (cur === null) continue;
+      if (!base[t]) { base[t] = cur; continue; }
+      const key = `dns:${a.id}:${t}`, diff = L.diffSets(base[t], cur);
+      if (!diff.added.length && !diff.removed.length) { delete pend[t]; resolve(key, T.dnsBack(t)); continue; }
+      // a change must be seen twice in a row, so a flaky resolver does not page anyone
+      const sig = cur.join(',');
+      pend[t] = pend[t]?.sig === sig ? { sig, n: pend[t].n + 1 } : { sig, n: 1 };
+      if (pend[t].n < 2) continue;
+      raise(key, t === 'NS' ? L.downPriority(a.criticality) : 'P2', T.dnsChanged(a, name, t), T.dnsChangedBody(diff), a.id, { path: ['dns', a.id, t], set: cur });
+    }
+  }
+  if (failed && !ok) throw new Error(lastErr);
+}
+
+// ---------- Page content: redirects, defacement, new third-party scripts (every 15 min) ----------
+async function checkContent(inv) {
+  for (const a of inv) {
+    if (skips(a, 'content') || state.status[a.id]?.ok === false) continue; // a down site already alerts
+    const url = a.url || `https://${a.domain}`;
+    let r, html;
+    try {
+      r = await fetch(url, { redirect: 'follow', headers: UA, signal: AbortSignal.timeout(20_000) });
+      if (!r.ok) { await r.body?.cancel(); continue; }
+      html = (await r.text()).slice(0, 3_000_000);
+    } catch { continue; }
+    const site = a.domain || new URL(url).hostname, base = state.web[a.id] ||= {};
+    const allowed = [...(a.allowedHosts || []), ...(base.allowed || [])];
+
+    const off = [new URL(r.url).hostname, L.metaRefreshTarget(html, r.url)].find(h => h && L.isForeign(h, site, allowed));
+    if (off) raise(`web:redirect:${a.id}`, L.downPriority(a.criticality), T.webRedirect(a, off), T.webRedirectBody(url, off), a.id, { path: ['web', a.id, 'allowed'], add: off });
+    else resolve(`web:redirect:${a.id}`, '');
+
+    const signs = L.defacementSigns(html, a.ignoreKeywords);
+    if (signs.length) raise(`web:deface:${a.id}`, L.downPriority(a.criticality), T.webDeface(a), T.webDefaceBody(url, signs), a.id);
+    else resolve(`web:deface:${a.id}`, T.webClean);
+
+    const ext = L.scriptHosts(html, r.url).filter(h => L.isForeign(h, site, allowed));
+    if (!base.scripts) { base.scripts = ext; continue; }
+    for (const h of ext) if (!base.scripts.includes(h))
+      raise(`web:script:${a.id}:${h}`, a.strictScripts ? 'P1' : 'P2', T.webScript(a, h), T.webScriptBody(url, h), a.id, { path: ['web', a.id, 'scripts'], add: h });
+  }
+}
+
 // ---------- Scheduler ----------
 const every = (name, ms, fn) => {
   let busy = false;
@@ -246,9 +383,12 @@ every('uptime', 60_000, inv => Promise.all(inv.map(checkAsset)));
 every('kev', 15 * 60_000, checkKEV);
 setTimeout(() => every('osv', 30 * 60_000, inv => onboard(inv, 'osv', () => checkOSV(inv))), 15_000); // after KEV is loaded
 setTimeout(() => every('eol', 6 * 3600_000, inv => onboard(inv, 'eol', () => checkEOL(inv))), 30_000);
+setTimeout(() => every('dns', 5 * 60_000, inv => onboard(inv, 'dns', () => checkDNS(inv))), 5_000);
+setTimeout(() => every('content', 15 * 60_000, inv => onboard(inv, 'web', () => checkContent(inv))), 20_000); // after the first uptime pass
+setTimeout(() => every('domain', 6 * 3600_000, inv => onboard(inv, 'domain', () => checkDomains(inv))), 40_000);
 
 // Watch the watcher: a feed that misses ~3 cycles is a blind spot
-const STALE = { kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000 };
+const STALE = { kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000 };
 every('health', 60_000, async () => {
   for (const [f, max] of Object.entries(STALE)) {
     const t = state.feeds[f];
@@ -288,7 +428,7 @@ http.createServer(async (req, res) => {
   // Signed acknowledge link from a notification: GET shows a confirm button (link previews cannot ack), POST acks
   const key = u.searchParams.get('key'), signed = L.verifyAck(key, u.searchParams.get('sig'), ACK_SECRET);
   if (u.pathname === '/api/ack' && signed) {
-    if (req.method === 'POST') { if (state.alerts[key]) state.alerts[key].ack = true; save(); return req.headers.accept?.includes('text/html') ? html(`<p>${escHtml(T.acked)}</p>`) : json({ ok: true }); }
+    if (req.method === 'POST') { ackAlert(key); return req.headers.accept?.includes('text/html') ? html(`<p>${escHtml(T.acked)}</p>`) : json({ ok: true }); }
     const a = state.alerts[key];
     return html(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:16px system-ui;padding:24px">
       <p><b>${escHtml(a ? `${a.prio} ${a.title}` : key)}</b></p><p>${escHtml(a?.body || '')}</p>
@@ -301,7 +441,7 @@ http.createServer(async (req, res) => {
     lang: VIGIA_LANG, inventory: inventory({ includePaused: true }), status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
   });
-  if (u.pathname === '/api/ack' && req.method === 'POST') { if (state.alerts[key]) state.alerts[key].ack = true; save(); return json({ ok: true }); }
+  if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }
   if (u.pathname === '/api/test' && req.method === 'POST') { await notify('P1', T.testTitle, T.testBody, 'test'); return json({ ok: true }); }
   if (u.pathname === '/') return html(fs.readFileSync(path.join(DIR, 'index.html')));
   json({ error: 'not found' }, 404);

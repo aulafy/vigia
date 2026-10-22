@@ -8,6 +8,8 @@
 | **P2** | Act within hours: a high-severity vulnerability applies, software is out of support, a feed is not updating | One push |
 | **P3** | Plan it: moderate vulnerabilities, upcoming end-of-life | Only in the daily digest and the dashboard |
 
+**Change alerts** (DNS records, registrar, transfer lock, redirects, new third-party scripts) compare against a baseline. Acknowledging one also **accepts the new value as the baseline**, so the same change does not alert again. The dashboard labels that button **Accept change**. Accept only changes you recognise.
+
 When a site comes back or a certificate is renewed, you receive a **RECOVERED** message. When a dependency is upgraded and OSV no longer reports it, the alert closes on its own. That closure is silent, except for P1s.
 
 ## ntfy (recommended)

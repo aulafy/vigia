@@ -76,6 +76,95 @@ export function verifyAck(key, sig, secret) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// ---------- Domain (RDAP) ----------
+// Second-level suffixes where the registrable domain has three labels. Override per asset with `registrableDomain`.
+const MULTI_SLD = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'com.es', 'org.es', 'nom.es', 'gob.es', 'edu.es',
+  'com.ar', 'com.mx', 'org.mx', 'com.br', 'com.au', 'net.au', 'org.au', 'co.jp', 'co.nz', 'com.co', 'com.pe', 'com.tr',
+  'co.za', 'com.cn', 'co.in', 'com.pt']);
+
+export function registrableDomain(host) {
+  const h = String(host).toLowerCase().replace(/\.$/, '');
+  if (/^[\d.]+$/.test(h) || h.includes(':')) return h; // IP address
+  const p = h.split('.');
+  if (p.length <= 2) return h;
+  return p.slice(MULTI_SLD.has(p.slice(-2).join('.')) ? -3 : -2).join('.');
+}
+
+// IANA bootstrap file (https://data.iana.org/rdap/dns.json) → RDAP base URL for the domain's TLD, or null (e.g. .es)
+export function rdapBase(bootstrap, domain) {
+  const tld = domain.split('.').pop();
+  for (const [tlds, urls] of bootstrap?.services || []) if (tlds.includes(tld)) return urls.find(u => u.startsWith('https://')) || urls[0];
+  return null;
+}
+
+export function parseRdap(j) {
+  const status = (j.status || []).map(s => String(s).toLowerCase());
+  const reg = (j.entities || []).find(e => (e.roles || []).includes('registrar'));
+  const fn = reg?.vcardArray?.[1]?.find(x => x[0] === 'fn')?.[3];
+  return {
+    expires: (j.events || []).find(e => e.eventAction === 'expiration')?.eventDate || null,
+    status,
+    registrar: fn || reg?.publicIds?.find(p => /iana/i.test(p.type))?.identifier || reg?.handle || null,
+    locked: status.some(s => s.includes('transfer prohibited')),
+    hold: status.filter(s => /hold|redemption|pending delete/.test(s)), // the domain stops resolving or is being deleted
+  };
+}
+
+export const daysUntil = (date, now = Date.now()) => (date ? Math.floor((new Date(date) - now) / 864e5) : null);
+export const domainExpiryPriority = days => (days === null || Number.isNaN(days) ? null : days < 7 ? 'P1' : days < 30 ? 'P2' : null);
+
+// ---------- DNS ----------
+// Empty values are dropped: a "null MX" (RFC 7505, exchange ".") means the domain receives no mail
+export const normRecords = list => [...new Set(list.map(x => String(x).toLowerCase().replace(/\.$/, '')).filter(Boolean))].sort();
+
+export function diffSets(before, after) {
+  const b = new Set(before), a = new Set(after);
+  return { added: after.filter(x => !b.has(x)), removed: before.filter(x => !a.has(x)) };
+}
+
+// ---------- Page content ----------
+// A host is foreign when it belongs to another registrable domain and is not explicitly allowed (subdomains of allowed hosts count).
+export function isForeign(host, siteHost, allowed = []) {
+  const h = String(host).toLowerCase();
+  if (registrableDomain(h) === registrableDomain(siteHost)) return false;
+  return !allowed.some(x => h === x || h.endsWith('.' + x));
+}
+
+export function scriptHosts(html, pageUrl) {
+  const hosts = new Set();
+  for (const m of html.matchAll(/<script\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)/gi)) {
+    try { hosts.add(new URL(m[1].replace(/&amp;/g, '&'), pageUrl).hostname.toLowerCase()); } catch {}
+  }
+  return [...hosts].filter(Boolean).sort();
+}
+
+export function metaRefreshTarget(html, pageUrl) {
+  for (const [tag] of html.matchAll(/<meta\b[^>]*>/gi)) {
+    if (!/http-equiv\s*=\s*["']?refresh/i.test(tag)) continue;
+    const m = tag.match(/content\s*=\s*["'][^"']*?url\s*=\s*['"]?([^"'>\s;]+)/i);
+    if (m) try { return new URL(m[1], pageUrl).hostname.toLowerCase(); } catch {}
+  }
+  return null;
+}
+
+// Typical signs of a defaced or SEO-spam-injected site. Comments are included on purpose: spam often hides there.
+const DEFACE = [/\bhacked\s+by\b/i, /\bdefaced\s+by\b/i, /\bh[a4]ck[e3]d\s+by\b/i, /\b(buy|cheap)\s+(viagra|cialis|levitra)\b/i,
+  /\bslot\s+gacor\b/i, /\bjudi\s+(online|slot|bola)\b/i, /\bsitus\s+slot\b/i];
+
+export function defacementSigns(html, ignore = []) {
+  const ign = ignore.map(i => String(i).toLowerCase());
+  return [...new Set(DEFACE.map(re => html.match(re)?.[0]).filter(m => m && !ign.some(i => m.toLowerCase().includes(i))))];
+}
+
+// "Acknowledge" on a change alert accepts the new value as the baseline
+export function applyAccept(root, { path, set, add }) {
+  let o = root;
+  for (const k of path.slice(0, -1)) o = o[k] ??= {};
+  const last = path.at(-1);
+  if (add !== undefined) o[last] = [...new Set([...(o[last] || []), add])].sort();
+  else o[last] = set;
+}
+
 export function localClock(timeZone, date = new Date()) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
     timeZone, hourCycle: 'h23', hour: 'numeric', year: 'numeric', month: '2-digit', day: '2-digit',
