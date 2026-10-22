@@ -1,0 +1,80 @@
+# Inventory reference
+
+The inventory is a JSON array in `data/inventory.json` (or the file set in `VIGIA_INV`). Each element is one **asset**: usually a website, but it can be any HTTPS endpoint, such as an API, a client portal or a VPN login page.
+
+Vigía re-reads the file on every cycle. Invalid entries are skipped and reported in the log, and the rest keep working.
+
+## Asset fields
+
+| Field | Required | Example | Description |
+|---|---|---|---|
+| `id` | yes | `"acme-shop"` | Unique, stable identifier. Alerts are keyed on it, so do not rename it casually. |
+| `client` | recommended | `"ACME Ltd"` | Shown at the start of every alert. |
+| `name` | recommended | `"Online shop"` | Human-readable name. |
+| `domain` | one of `domain`/`url` | `"example.com"` | Used for the TLS check, and for the uptime check when there is no `url`. |
+| `url` | one of `domain`/`url` | `"https://example.com/health"` | Exact URL for the uptime check. Redirects are followed. |
+| `expect` | no | `"Add to cart"` | Text that must appear in the response. Catches broken pages that still return 200, such as a white screen, a database error or a defaced homepage. |
+| `criticality` | no (`medium`) | `"high"` | `high`, `medium` or `low`. A high asset turns downtime, KEV matches and critical CVEs into **P1**. |
+| `contact` | no | `"Jane +34 600…"` | Included in downtime alerts so you know who to call. |
+| `stack` | no | `[…]` | Software the asset runs (see below). |
+| `paused` | no | `true` | Skip every check, for example during a migration. Existing alerts are kept. |
+| `failThreshold` | no (`2`) | `3` | Consecutive failed probes before raising a downtime alert. |
+| `timeoutMs` | no (`10000`) | `20000` | HTTP timeout for the uptime probe. |
+
+The legacy Spanish field names `cliente`, `criticidad` (`alta`/`media`/`baja`) and `contacto` are also accepted.
+
+## Stack entries
+
+A stack entry describes one piece of software. Which fields you fill decides which checks apply to it:
+
+```json
+{ "product": "wordpress", "version": "6.4.3" }
+```
+*KEV.* `product` is matched as a whole word against the vendor and product of each newly added KEV entry.
+
+```json
+{ "product": "apache", "kev": ["apache http server"], "version": "2.4.58" }
+```
+*KEV with explicit phrases.* Use `kev` when the product name alone is ambiguous: "apache" alone would also match Apache OFBiz, Struts, Tomcat… You can list several phrases.
+
+```json
+{ "ecosystem": "npm", "name": "lodash", "version": "4.17.15" }
+```
+*OSV.* An exact package version. Vigía asks OSV which advisories affect *that* version, so you are never alerted about a bug that was fixed before your version.
+
+```json
+{ "product": "php", "version": "8.1.27", "eol": "php" }
+```
+*End-of-life.* `eol` is the product id on [endoflife.date](https://endoflife.date). The version is matched to the most specific release cycle (`8.1.27` belongs to cycle `8.1`). This entry is also checked against KEV, because it has a `product`.
+
+### OSV ecosystems
+
+Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`, `crates.io`, `NuGet`, `Hex`, `Pub`. For OS packages: `Debian:12`, `Ubuntu:22.04`, `Ubuntu:24.04`, `Alpine:v3.19`, `Rocky Linux:9`. The full list is in the [OSV schema](https://ossf.github.io/osv-schema/#affectedpackage-field).
+
+## How alerts are prioritised
+
+| Finding | high | medium / low |
+|---|---|---|
+| Site down (≥ `failThreshold` failures) | P1 | P2 |
+| TLS expires < 3 days / < 14 days | P1 / P2 | P1 / P2 |
+| TLS unreadable while the site answers | P2 | P2 |
+| New KEV entry matches a stack product | P1 | P2 |
+| OSV advisory that is also in KEV | P1 | P1 |
+| OSV advisory, critical | P1 | P2 |
+| OSV advisory, high | P2 | P2 |
+| OSV advisory, moderate/low/unknown | P3 | P3 |
+| Software already end-of-life | P2 | P3 |
+| Software end-of-life within 90 days | P3 | P3 |
+
+On the very first run, Vigía records the whole KEV catalogue but alerts only on entries added in the last 14 days. After that, every newly added entry is checked.
+
+## Building the inventory quickly
+
+Writing the inventory by hand works for a dozen sites. Beyond that, generate it:
+
+- **Node projects:** `npm ls --all --json` or the `package-lock.json`. Every package with a version becomes `{ "ecosystem": "npm", "name": …, "version": … }`.
+- **PHP projects:** `composer show --format=json` or `composer.lock`, with `"ecosystem": "Packagist"`.
+- **Containers and servers:** `trivy fs --format cyclonedx` or `syft <image> -o cyclonedx-json` produce an SBOM. Each component's `purl` maps directly to an OSV ecosystem, name and version.
+- **WordPress:** `wp core version`, `wp plugin list --format=json` and `wp theme list --format=json` through WP-CLI over SSH.
+
+Keep only the dependencies that are actually deployed. Including dev dependencies creates noise.

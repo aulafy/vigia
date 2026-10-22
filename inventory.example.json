@@ -1,0 +1,29 @@
+[
+  {
+    "id": "acme-shop",
+    "client": "ACME Ltd",
+    "name": "Online shop",
+    "domain": "example.com",
+    "url": "https://example.com",
+    "expect": "Example Domain",
+    "criticality": "high",
+    "contact": "Jane Doe +34 600 000 000",
+    "stack": [
+      { "product": "wordpress", "version": "6.4.3" },
+      { "product": "php", "version": "8.1.27", "eol": "php" },
+      { "product": "nginx", "version": "1.24.0", "eol": "nginx" },
+      { "product": "apache", "kev": ["apache http server"], "version": "2.4.58" },
+      { "ecosystem": "npm", "name": "lodash", "version": "4.17.15" },
+      { "ecosystem": "Packagist", "name": "guzzlehttp/guzzle", "version": "7.4.0" }
+    ]
+  },
+  {
+    "id": "acme-blog",
+    "client": "ACME Ltd",
+    "name": "Corporate blog",
+    "domain": "example.org",
+    "criticality": "low",
+    "paused": true,
+    "stack": []
+  }
+]

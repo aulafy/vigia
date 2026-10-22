@@ -1,0 +1,13 @@
+services:
+  vigia:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      # Bound to localhost only. Reach the dashboard through an SSH tunnel, a VPN,
+      # or a reverse proxy with HTTPS (required for acknowledging from the phone).
+      - "127.0.0.1:4848:4848"
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,15 @@
+{
+  "name": "vigia",
+  "version": "0.3.0",
+  "description": "24/7 watch over your clients' sites: uptime, TLS, exploited vulnerabilities (CISA KEV), vulnerable dependencies (OSV) and end-of-life software, with phone alerts.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "git+https://github.com/aulafy/vigia.git" },
+  "keywords": ["monitoring", "uptime", "vulnerability", "cve", "kev", "osv", "sbom", "ntfy", "msp", "on-call"],
+  "license": "MIT"
+}

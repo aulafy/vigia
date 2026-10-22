@@ -1,0 +1,18 @@
+# VPS Linux sin Docker: cp deploy/vigia.service /etc/systemd/system/ && systemctl enable --now vigia
+[Unit]
+Description=Vigia monitor 24/7
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vigia
+WorkingDirectory=/opt/vigia
+ExecStart=/usr/bin/node /opt/vigia/server.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/vigia/data
+
+[Install]
+WantedBy=multi-user.target

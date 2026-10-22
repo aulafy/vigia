@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Always-on Mac (launchd). See docs/deployment.md.
+     1. Replace /path/to/vigia with the absolute path of this folder and check `which node`.
+     2. cp deploy/net.vigia.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/net.vigia.plist
+     3. Prevent sleep: sudo pmset -a sleep 0 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>net.vigia</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/local/bin/node</string>
+    <string>/path/to/vigia/server.mjs</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/vigia</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/path/to/vigia/data/vigia.log</string>
+  <key>StandardErrorPath</key><string>/path/to/vigia/data/vigia.log</string>
+</dict></plist>
