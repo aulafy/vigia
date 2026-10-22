@@ -42,16 +42,29 @@ export function category(key) {
 
 const median = xs => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 
-// "2026-10" → [start, end) in ms (UTC)
-export function monthRange(month) {
+// Offset of a time zone at an instant (ms), from Intl only
+function tzOffset(ms, timeZone) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(new Date(ms)).map(x => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms;
+}
+// The instant local midnight of the 1st happens in that zone (twice-corrected for DST changes)
+export function zonedMonthStart(y, m, timeZone = 'UTC') {
+  const guess = Date.UTC(y, m - 1, 1);
+  const first = guess - tzOffset(guess, timeZone);
+  return guess - tzOffset(first, timeZone);
+}
+
+// "2026-10" → [start, end) in ms, as months are lived in `timeZone` (Madrid's October starts at 22:00 UTC on 30 September)
+export function monthRange(month, timeZone = 'UTC') {
   const [y, m] = String(month).split('-').map(Number);
   if (!y || !m || m < 1 || m > 12) throw new Error(`invalid month "${month}", expected YYYY-MM`);
-  return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 1)];
+  return [zonedMonthStart(y, m, timeZone), zonedMonthStart(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1, timeZone)];
 }
 export const previousMonth = month => { const [y, m] = month.split('-').map(Number); return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`; };
 
-export function reportStats({ month, assets = [], history = [], open = [] }) {
-  const [from, to] = monthRange(month);
+export function reportStats({ month, assets = [], history = [], open = [], timeZone = 'UTC' }) {
+  const [from, to] = monthRange(month, timeZone);
   const inMonth = history.filter(h => h.first >= from && h.first < to && h.prio !== 'P3');
   let checks = 0, ok = 0;
   for (const a of assets) if (a.avail) { checks += a.avail[0]; ok += a.avail[1]; }
@@ -82,7 +95,7 @@ export function renderReport(d, lang = 'en') {
   const table = (head, rows) => rows.length ? `<table><thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>` : `<p class="mut">${S.none}</p>`;
   const prioRank = { P1: 0, P2: 1, P3: 2 };
   const open = [...d.open].sort((a, b) => prioRank[a.prio] - prioRank[b.prio] || a.first - b.first);
-  const [from, to] = monthRange(d.month);
+  const [from, to] = monthRange(d.month, d.timeZone || 'UTC');
   const hist = d.history.filter(h => h.first >= from && h.first < to && h.prio !== 'P3').sort((a, b) => a.first - b.first);
   const recs = open.filter(a => a.prio !== 'P3').slice(0, 8);
   const kpi = (label, value, sub = '') => `<div class="kpi"><div class="v">${esc(value ?? S.na)}</div><div class="l">${esc(label)}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;

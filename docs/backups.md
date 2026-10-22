@@ -63,7 +63,7 @@ The backup hosts must reach Vigía over HTTPS, behind a reverse proxy, Tailscale
 
 Copy `deploy/vigia-checkin.sh` to the backup host and set two variables:
 
-> **Give each server its own key, not the master secret.** On the Vigía host, run `node server.mjs key <asset-id>` and use the result as `VIGIA_CHECKIN_SECRET` on that asset's servers. A key only works for its own asset, so a compromised server cannot fake backups or inventories for other clients. Once every server has its own key, set `CHECKIN_ALLOW_MASTER=false`.
+> **Give each server its own key, not the master secret.** On the Vigía host, run `node server.mjs key <asset-id>` and use the result as `VIGIA_CHECKIN_SECRET` on that asset's servers. A key only works for its own asset, so a compromised server cannot fake backups or inventories for other clients. Since 0.9 the master secret is rejected unless `CHECKIN_ALLOW_MASTER=true`, which is only meant for migrating.
 
 
 ```bash
@@ -110,5 +110,5 @@ content-type: application/json
 ```
 
 - The body is optional. Every field in it is optional too.
-- The signature covers the timestamp, the exact path with its query and the body. A check-in cannot be moved to another job, edited, or replayed later. Signatures expire after 5 minutes, and the same signature is accepted only once (a replay gets `409`).
+- The signature covers the timestamp, the exact path with its query and the body. A check-in cannot be moved to another job, edited, or replayed later. Signatures expire after 5 minutes, and calls must move forward in time per job: replaying an older call after a newer one gets `409`. This covers a captured "fail", then a "success", then the old "fail" replayed.
 - Responses: `200` accepted, `401` bad or expired signature, `404` unknown job, `400` invalid status or body.

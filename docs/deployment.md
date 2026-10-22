@@ -16,7 +16,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-State and inventory live in `./data` on the host. The dashboard is published on `127.0.0.1:4848` only. Reach it through an SSH tunnel:
+Set `DASH_PASS` in `.env` first: inside the container Vigía listens on all interfaces, and it refuses to start without a password there. State and inventory live in `./data` on the host. The dashboard is published on `127.0.0.1:4848` only. Reach it through an SSH tunnel:
 
 ```bash
 ssh -L 4848:127.0.0.1:4848 user@your-vps

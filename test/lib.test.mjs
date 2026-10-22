@@ -441,3 +441,55 @@ test('EPSS parsing and escalation', () => {
   assert.equal(L.epssPriority('P2', 0.2, { p1: 0.15, p2: 0.05 }), 'P1');
   assert.deepEqual(L.cvesIn('fix CVE-2026-0322 and cve-2024-3400, again CVE-2026-0322'), ['CVE-2026-0322', 'CVE-2024-3400']);
 });
+
+test('advisorySeverity: negations never read as exploitation; research wording does', () => {
+  const p = (title, text = '') => L.advisorySeverity({ title, text });
+  assert.equal(p('X (Severity: HIGH)', 'Fortinet is not aware of any active exploitation in the wild.').prio, 'P2');
+  assert.equal(p('X (Severity: HIGH)', 'Palo Alto Networks is not aware of any malicious exploitation of this issue.').prio, 'P2');
+  assert.equal(p('X', 'This issue is not known to be exploited in the wild.').prio, 'P3');
+  assert.equal(p('X', 'There is no evidence of active exploitation.').prio, 'P3');
+  assert.equal(p('Aviso crítico', 'No se tiene constancia de que esté siendo explotada activamente.').prio, 'P2');
+  assert.equal(p('X', 'Not known to be exploited. However, CISA reports it was exploited in the wild.').prio, 'P1');
+  assert.deepEqual(p('Swarming Against Citrix 0-Day Exploitation'), { prio: 'P1', exploited: true });
+  assert.equal(p('Citrix NetScaler DTLS Preauth Memory Overflow').prio, 'P2');
+  assert.deepEqual(p('A New SonicWall Scanning Spike Echoes the Pattern That Preceded CVE-2026-1'), { prio: 'P2', exploited: false, recon: true });
+});
+
+test('htmlText survives entities outside Unicode', () => {
+  assert.equal(L.htmlText('a &#x110000; b &#55296; c &#233;'), 'a � b � c é');
+  assert.doesNotThrow(() => L.parseFeed('<item><title>&#99999999;</title></item>'));
+});
+
+test('parsePush reports truncation instead of cutting silently', () => {
+  const lock = { packages: Object.fromEntries(Array.from({ length: L.MAX_PUSH + 5 }, (_, i) => [`node_modules/p${i}`, { version: '1.0.0' }])) };
+  const r = L.parsePush({ parts: [{ kind: 'npm-lock', lock }] });
+  assert.deepEqual([r.stack.length, r.total, r.truncated], [L.MAX_PUSH, L.MAX_PUSH + 5, true]);
+  assert.equal(L.parsePush({ parts: [{ kind: 'os', id: 'ubuntu', version: '22.04' }] }).truncated, false);
+});
+
+test('replayCheck: A, B, A is rejected; same-second calls with different signatures pass', () => {
+  let rec = L.replayCheck(undefined, '100', 'A');
+  assert.deepEqual(rec, { ts: 100, sigs: ['A'] });
+  rec = L.replayCheck(rec, '101', 'B');
+  assert.equal(L.replayCheck(rec, '100', 'A'), null, 'older call after a newer one');
+  assert.equal(L.replayCheck(rec, '101', 'B'), null, 'exact replay');
+  rec = L.replayCheck(rec, '101', 'C');
+  assert.deepEqual(rec.sigs, ['B', 'C']);
+});
+
+test('ack payload binds key, instance and expiry', () => {
+  const sig = L.signAck(L.ackPayload('down:a', 111, 999), 's');
+  assert.ok(L.verifyAck(L.ackPayload('down:a', 111, 999), sig, 's'));
+  assert.ok(!L.verifyAck(L.ackPayload('down:a', 112, 999), sig, 's'), 'another instance of the same alert');
+  assert.ok(!L.verifyAck(L.ackPayload('down:a', 111, 1999), sig, 's'), 'extended expiry');
+});
+
+test('digestPick uses the cursor, not the last 24 h', () => {
+  const al = [{ key: 'a', prio: 'P3', first: 50 }, { key: 'b', prio: 'P3', first: 150 }, { key: 'c', prio: 'P2', first: 10, ack: false }, { key: 'd', prio: 'P2', first: 10, ack: true }, { key: 'canary:x', prio: 'P2', first: 200 }];
+  const { p2, p3 } = L.digestPick(al, 100);
+  assert.deepEqual([p2.map(x => x.key), p3.map(x => x.key)], [['c'], ['b']]);
+});
+
+test('edge devices keep the "checked" date', () => {
+  assert.equal(L.edgeItem({ type: 'fortigate', version: '7.2.5', checked: '2026-10-01' }, 0).checked, '2026-10-01');
+});

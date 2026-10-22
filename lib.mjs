@@ -31,7 +31,7 @@ export function edgeItem(d, i) {
   return {
     edge: true, edgeIndex: i, type: d.type, name: d.name || c.label || d.type, product: c.label || d.type, version: d.version ? String(d.version) : undefined,
     kev: d.kev || c.kev || [d.type], adv: d.adv || c.adv || [d.type], feeds: d.feeds || c.feeds || ['incibe'], ...(c.eol && d.version && { eol: c.eol }),
-    portal: d.portal, management: d.management,
+    portal: d.portal, management: d.management, ...(d.checked && { checked: d.checked }),
   };
 }
 
@@ -104,6 +104,24 @@ export function eolPriority(days, criticality) {
 
 // Signed acknowledge links, so an alert can be acknowledged from the phone without the dashboard password.
 export const signAck = (key, secret) => crypto.createHmac('sha256', secret).update(key).digest('hex').slice(0, 32);
+
+// An acknowledge link is bound to the alert instance (its creation time) and expires
+export const ackPayload = (key, first, exp) => `${key}|${first}|${exp}`;
+
+// Signed calls must move forward in time: a captured older call cannot be replayed after a newer one (A, B, A).
+// Calls in the same second are told apart by their signature. Returns the updated record, or null to reject.
+export function replayCheck(rec = {}, ts, sig) {
+  const t = Number(ts);
+  if (rec.ts != null && t < rec.ts) return null;
+  if (t === rec.ts && (rec.sigs || []).includes(sig)) return null;
+  return { ts: t, sigs: t === rec.ts ? [...rec.sigs, sig].slice(-20) : [sig] };
+}
+
+// Daily digest: open unacknowledged P2s, and P3s created since the last digest that went out
+export function digestPick(alerts, since) {
+  const all = alerts.filter(a => !String(a.key).startsWith('canary:'));
+  return { p2: all.filter(a => a.prio === 'P2' && !a.ack), p3: all.filter(a => a.prio === 'P3' && a.first > since) };
+}
 
 export function verifyAck(key, sig, secret) {
   if (!secret || !key || typeof sig !== 'string') return false;
@@ -440,8 +458,10 @@ export function parsePush(body) {
       }
     } catch (e) { errors.push(`part ${i} (${part?.kind}): ${e.message}`); }
   }
-  return { stack: dedupeStack(stack).slice(0, 20_000), errors };
+  const all = dedupeStack(stack);
+  return { stack: all.slice(0, MAX_PUSH), errors, total: all.length, truncated: all.length > MAX_PUSH };
 }
+export const MAX_PUSH = 20_000;
 
 const stackKey = s => (s.wp ? `wp:${wpKey(s)}@${s.version}` : s.ecosystem ? `${s.ecosystem}:${s.name}@${s.version}` : `${s.product}@${s.version}`);
 export function dedupeStack(list) {
@@ -460,8 +480,9 @@ export function inventoryStale(asset, rec, now = Date.now()) {
 
 // ---------- Vendor advisories (RSS) ----------
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const codePoint = n => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : '\ufffd');
 const decode = s => s.replace(/&(#x[\da-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#'
-  ? String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENTITIES[e.toLowerCase()] ?? m);
+  ? codePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENTITIES[e.toLowerCase()] ?? m);
 export const htmlText = s => decode(decode(String(s || '')).replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 
 // Minimal RSS/Atom reader: enough for vendor PSIRT feeds, no XML library
@@ -483,10 +504,27 @@ const phraseRe = p => new RegExp(`(^|[^a-z0-9])${reEscape(String(p).toLowerCase(
 // Does this advisory concern this device? Product phrases only: "Fortinet" alone would match every PHP or OpenSSL bulletin
 export const advisoryMatches = (item, device) => { const hay = `${item.title} ${item.text}`.toLowerCase(); return (device.adv || []).some(p => phraseRe(p).test(hay)); };
 
-// Exploited in the wild beats everything; then the vendor's own severity
+// "Not known to be exploited in the wild" must never read as exploitation: negated phrases are removed first
+const NEGATED = [
+  // a negation, then "exploit…" later in the same sentence ("not aware of any malicious exploitation of this issue")
+  /\b(?:not|no|never|without|unaware)\b[^.;]{0,50}?\bexploit\w*(?:[^.;]{0,40}?\bin the wild)?/gi,
+  /\b(?:no|sin|ninguna?)\b[^.;]{0,50}?\bexplota\w*(?:[^.;]{0,20}?\bactiva(?:mente)?)?/gi,
+];
+const EXPLOITED = [
+  /\b(actively exploited|exploited in the wild|in the wild|under active exploitation|known exploited|exploited in attacks|being exploited|explotad[ao]s? activamente|explotaci[oó]n activa)\b/i,
+  /\b(0-?day|zero-?day)s?\b.{0,50}\b(exploit(ed|ation)|attacks?|campaign)\b/i,
+  /\b(exploit(ed|ation)|attacks?)\b.{0,50}\b(0-?day|zero-?day)s?\b/i,
+];
+const PREAUTH = /\b(pre-?auth(entication)?|unauthenticated|sin autenticaci[oó]n)\b.{0,40}\b(rce|remote code execution|code execution|command injection|memory (overflow|corruption)|ejecuci[oó]n remota)\b/i;
+const RECON = /\b(scanning|reconnaissance|recon|probing|brute[- ]?forc\w*|credential[- ]based|spike|surge|escaneos?)\b/i;
+
+// Exploited in the wild beats everything; then reconnaissance against the product (GreyNoise-style early warning); then severity
 export function advisorySeverity(item) {
-  const t = `${item.title} ${item.text}`;
-  if (/\b(actively exploited|exploited in the wild|in the wild|under active exploitation|known exploited|explotad[ao]s? activamente|explotaci[oó]n activa)\b/i.test(t)) return { prio: 'P1', exploited: true };
+  let t = `${item.title} ${item.text}`;
+  for (const re of NEGATED) t = t.replace(re, ' ');
+  if (EXPLOITED.some(re => re.test(t))) return { prio: 'P1', exploited: true };
+  if (PREAUTH.test(t)) return { prio: 'P2', exploited: false };
+  if (RECON.test(item.title)) return { prio: 'P2', exploited: false, recon: true };
   // on an edge device, "high" from the vendor is already worth a push: these are the boxes attackers scan for
   if (/\bseverity:?\s*(critical|high)\b|\b(critical|cr[ií]tic[ao]s?)\b|cvss(v3|v4)?( base)? score:? *([7-9]|10)(\.\d)?\b/i.test(t)) return { prio: 'P2', exploited: false };
   return { prio: 'P3', exploited: false };

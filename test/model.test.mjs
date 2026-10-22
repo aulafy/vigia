@@ -86,7 +86,8 @@ test('feeds, channels, badge and formatting', () => {
   assert.deepEqual(kev, { name: 'kev', at: now - 60_000, err: 'timeout' });
   assert.deepEqual(M.channelsView(S).map(c => [c.name, c.configured, c.ok]), [['ntfy', true, false], ['telegram', false, null], ['webhook', true, true]]);
   assert.equal(M.navBadge(S), 4);
-  assert.equal(M.ago(now - 30_000, 'es', now), 'hace 30 s');
+  assert.equal(M.ago(now - 30_000, 'es', now), 'ahora mismo'); // minute granularity: fewer redraws
+  assert.equal(M.ago(now - 5 * 60_000, 'es', now), 'hace 5 min');
   assert.equal(M.ago(now - 3 * 3600_000, 'en', now), '3 h ago');
   assert.equal(M.ago(null, 'en', now), 'never');
   assert.equal(M.fmtBytes(2.4e9), '2.4 GB');

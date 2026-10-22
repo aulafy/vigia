@@ -71,3 +71,15 @@ test('renderReport with an empty month says so instead of failing', () => {
   const html = renderReport({ client: 'X', month: '2026-10', assets: [], history: [], open: [], backups: [] }, 'en');
   assert.match(html, /No pending actions/);
 });
+
+test('months are counted in the configured time zone, DST included (Codex: UTC boundaries)', async () => {
+  const { monthRange: mr } = await import('../report.mjs');
+  assert.deepEqual(mr('2026-10', 'Europe/Madrid').map(t => new Date(t).toISOString()), ['2026-09-30T22:00:00.000Z', '2026-10-31T23:00:00.000Z']);
+  assert.deepEqual(mr('2026-03', 'Europe/Madrid').map(t => new Date(t).toISOString()), ['2026-02-28T23:00:00.000Z', '2026-03-31T22:00:00.000Z']);
+  assert.deepEqual(mr('2026-10').map(t => new Date(t).toISOString()), ['2026-10-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z']);
+  // an incident at 00:30 local on 1 October belongs to October in Madrid, to September in UTC
+  const at = Date.parse('2026-09-30T22:30:00Z');
+  const s = reportStats({ month: '2026-10', timeZone: 'Europe/Madrid', history: [{ key: 'down:a', prio: 'P1', first: at, asset: 'a' }] });
+  assert.equal(s.incidents.P1, 1);
+  assert.equal(reportStats({ month: '2026-10', history: [{ key: 'down:a', prio: 'P1', first: at, asset: 'a' }] }).incidents.P1, 0);
+});

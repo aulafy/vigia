@@ -4,7 +4,7 @@ import * as M from './model.js';
 
 const esc = M.esc;
 const root = document.getElementById('root');
-const ui = { S: null, offline: false, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set() };
+const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '' };
 
 // per-viewer preferences only (theme, language); everything that matters lives on the server
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } return null; };
@@ -20,17 +20,22 @@ function route() {
   return { page: NAV.some(n => n[0] === page) || page === 'mas' ? page : 'hoy', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
 }
 
-async function api(method, path) {
-  const r = await fetch(path, { method, headers: { 'x-vigia-ui': '1' }, cache: 'no-store' });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+async function api(method, path, signal) {
+  const r = await fetch(path, { method, headers: { 'x-vigia-ui': '1' }, cache: 'no-store', signal });
+  if (!r.ok) { const e = new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`); e.status = r.status; throw e; }
   return r.json();
 }
 
 // A redraw under the user's finger would swallow the tap: right after a touch or click, wait for it to finish
 let lastPointer = 0;
 document.addEventListener('pointerdown', () => { lastPointer = Date.now(); }, true);
+let inflight = null;
 async function refresh() {
-  try { ui.S = await api('GET', '/api/state'); ui.offline = false; } catch { ui.offline = true; }
+  inflight?.abort();
+  const ctl = inflight = new AbortController(), timer = setTimeout(() => ctl.abort(), 9000);
+  try { const S = await api('GET', '/api/state', ctl.signal); if (ctl !== inflight) return; ui.S = S; ui.error = null; ui.refreshedAt = Date.now(); }
+  catch (e) { if (ctl !== inflight) return; ui.error = e.status === 401 ? 'auth' : e.status ? 'server' : 'offline'; }
+  finally { clearTimeout(timer); }
   const wait = 1500 - (Date.now() - lastPointer);
   if (wait > 0) setTimeout(render, wait); else render();
 }
@@ -54,7 +59,7 @@ function alertRow(a, idx, { client = true } = {}) {
   const meta = [client ? esc(c || t.system) : '', esc(ago(a.first)), a.epss ? `EPSS ${Math.round(a.epss * 100)} %` : ''].filter(Boolean).join(' · ');
   const action = a.ack ? `<span class="mut small">${esc(t.acked)}</span>`
     : `<button class="btn small ${a.prio === 'P1' ? 'primary' : ''}" data-act="ack" data-key="${esc(a.key)}">${icon('check', 'sm')}${esc(a.accept ? t.accept : t.ack)}</button>`;
-  return `<div class="row alert ${a.ack ? 'acked' : ''}"><span class="tag ${a.prio}">${a.prio}</span><div class="main"><div class="title">${esc(a.title)}</div><div class="meta">${meta}</div><div class="body clamp ${ui.open.has(a.key) ? 'open' : ''}" data-act="expand" data-key="${esc(a.key)}" title="${esc(ui.open.has(a.key) ? '' : '…')}">${esc(a.body)}</div></div><div class="side-r">${action}</div></div>`;
+  return `<div class="row alert ${a.ack ? 'acked' : ''}"><span class="tag ${a.prio}">${a.prio}</span><div class="main"><div class="title">${esc(a.title)}</div><div class="meta">${meta}</div><div class="body clamp ${ui.open.has(a.key) ? 'open' : ''}" data-act="expand" data-key="${esc(a.key)}" role="button" tabindex="0" aria-expanded="${ui.open.has(a.key)}" aria-label="${esc(ui.open.has(a.key) ? t.showLess : t.showMore)}: ${esc(a.title)}">${esc(a.body)}</div></div><div class="side-r">${action}</div></div>`;
 }
 
 function siteRow(a, S) {
@@ -102,7 +107,7 @@ const PAGES = {
     const seg = (k, opts) => `<div class="seg">${opts.map(([v, label]) => `<button data-act="filter" data-k="${k}" data-v="${v}" aria-pressed="${f[k] === v}">${esc(label)}</button>`).join('')}</div>`;
     const tools = `<div class="toolbar">${seg('view', [['open', t.unack], ['all', t.all]])}${seg('prio', [['', t.all], ['P1', 'P1'], ['P2', 'P2'], ['P3', 'P3']])}
       <select data-act="client" aria-label="${esc(t.nav.clientes)}"><option value="">${esc(t.nav.clientes)}: ${esc(t.all)}</option>${clients.map(c => `<option ${f.client === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-      <label class="search">${icon('search', 'sm')}<input id="q" type="search" value="${esc(f.q)}" placeholder="${esc(t.search)}" autocomplete="off"></label></div>`;
+      <label class="search">${icon('search', 'sm')}<input id="q" type="search" value="${esc(f.q)}" placeholder="${esc(t.search)}" aria-label="${esc(t.search)}" autocomplete="off"></label></div>`;
     return head(t.nav.alertas, t.sub.alertas) + tools + list(M.filterAlerts(S, f).map(a => alertRow(a, idx)), t.none);
   },
 
@@ -175,28 +180,42 @@ function clientDetail(S, c) {
 }
 
 // ---------- shell ----------
+// A stable description of the focused control, so it can be found again after a redraw
+const focusId = el => el && el !== document.body ? (el.id ? `#${el.id}` : ['act', 'key', 'k', 'v'].map(k => el.dataset?.[k] ?? '').join('|') + (el.getAttribute?.('href') || '')) : null;
+function restoreFocus(id, sel) {
+  if (!id) return;
+  const el = id.startsWith('#') ? document.getElementById(id.slice(1)) : [...root.querySelectorAll('button,a,[tabindex],select,input')].find(x => focusId(x) === id);
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  if (sel && el.setSelectionRange) el.setSelectionRange(...sel);
+}
+
 function render() {
   const t = T();
+  const errorBanner = { auth: ['bad', t.authExpired], server: ['bad', t.serverError], offline: ['warn', ui.S ? t.offline : t.offlineBoot] }[ui.error];
   if (!ui.S) {
-    if (ui.offline) root.innerHTML = `<div class="app"><aside class="side"></aside><main><div class="banner bad">${icon('alert')}${esc(t.offline)}</div></main></div>`;
+    if (ui.error) root.innerHTML = `<div class="app"><aside class="side"></aside><main id="main"><div class="banner bad">${icon('alert')}${esc(errorBanner[1])}</div></main></div>`;
     return;
   }
   const S = ui.S, { page, arg } = route(), badge = M.navBadge(S), s = M.summarize(S);
   document.documentElement.lang = lang().startsWith('es') ? 'es' : 'en';
   document.title = `${badge ? `(${badge}) ` : ''}Vigía`;
   const current = p => (p === page || (p === 'mas' && MORE.includes(page)) ? 'aria-current="page"' : '');
-  const nav = NAV.map(([p, ic]) => `<a href="#/${p}" ${current(p)}>${icon(ic)}<span>${esc(t.nav[p])}</span>${p === 'alertas' && badge ? `<span class="badge">${badge}</span>` : ''}</a>`).join('');
+  const nav = NAV.map(([p, ic]) => `<a href="#/${p}" ${current(p)}>${icon(ic)}<span>${esc(t.nav[p])}</span>${p === 'alertas' && badge ? `<span class="badge" aria-label="${badge}">${badge}</span>` : ''}</a>`).join('');
   const tabs = ['hoy', 'alertas', 'clientes', 'equipos', 'mas'].map(p => `<a href="#/${p}" ${current(p)}>${icon(p === 'mas' ? 'more' : NAV.find(n => n[0] === p)[1])}<span>${esc(t.nav[p])}</span>${p === 'alertas' && badge ? `<span class="badge">${badge}</span>` : ''}</a>`).join('');
-  const banners = (ui.offline ? `<div class="banner warn">${icon('alert')}${esc(t.offline)}</div>` : '')
-    + (s.chainDown ? `<div class="banner bad">${icon('bell')}${esc(t.chainDown)}</div>` : '')
+  const banners = (errorBanner ? `<div class="banner ${errorBanner[0]}" role="alert">${icon('alert')}${esc(errorBanner[1])}</div>` : '')
+    + (s.chainDown ? `<div class="banner bad" role="alert">${icon('bell')}${esc(t.chainDown)}</div>` : '')
     + (S.config?.inventoryError ? `<div class="banner bad">${icon('alert')}${esc(t.invError)}</div>` : '');
-
-  // keep the search box usable across the 10-second refresh
-  const q = document.activeElement?.id === 'q' ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
-  root.innerHTML = `<div class="app"><aside class="side"><div class="brand"><img src="icon.svg" alt="">Vigía</div><nav class="nav" aria-label="Vigía">${nav}</nav>
-    <div class="side-foot"><div><span class="dot ${s.level === 'ok' ? '' : 'bad'}"></span>${esc(t.level[s.level])}</div><div>${esc(t.updated)} ${esc(ago(Date.now()))}</div><div>v${esc(S.version)}</div></div></aside>
-    <main id="main">${banners}${(PAGES[page] || PAGES.hoy)(S, arg)}</main><nav class="tabbar" aria-label="Vigía">${tabs}</nav></div>`;
-  if (q) { const el = document.getElementById('q'); el.focus(); el.setSelectionRange(...q); }
+  const updated = new Date(ui.refreshedAt).toLocaleTimeString(lang().startsWith('es') ? 'es-ES' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
+  const html = `<a class="skip" href="#main">${esc(t.skip)}</a><div class="app"><aside class="side"><div class="brand"><img src="icon.svg" alt="">Vigía</div><nav class="nav" aria-label="Vigía">${nav}</nav>
+    <div class="side-foot"><div><span class="dot ${s.level === 'ok' ? '' : 'bad'}"></span>${esc(t.level[s.level])}</div><div>${esc(t.updated)} ${esc(updated)}</div><div>v${esc(S.version)}</div></div></aside>
+    <main id="main" tabindex="-1">${banners}${(PAGES[page] || PAGES.hoy)(S, arg)}</main><nav class="tabbar" aria-label="Vigía">${tabs}</nav></div>`;
+  // nothing changed: leave the DOM alone (focus, selection and screen-reader position stay intact)
+  if (html === ui.html) return;
+  ui.html = html;
+  const active = document.activeElement, id = focusId(active), sel = active?.id === 'q' ? [active.selectionStart, active.selectionEnd] : null;
+  root.innerHTML = html;
+  restoreFocus(id, sel);
 }
 
 // ---------- events ----------
@@ -206,14 +225,23 @@ root.addEventListener('click', async e => {
   const act = b.dataset.act, t = T();
   if (act === 'ack') { b.disabled = true; try { await api('POST', `/api/ack?key=${encodeURIComponent(b.dataset.key)}`); toast(`${t.acked} ✓`); } catch (err) { toast(err.message); } return refresh(); }
   if (act === 'test') { try { await api('POST', '/api/test'); toast(t.testSent); } catch (err) { toast(err.message); } return; }
-  if (act === 'expand') { const k = b.dataset.key; if (ui.open.has(k)) ui.open.delete(k); else ui.open.add(k); b.classList.toggle('open'); return; }
+  if (act === 'expand') return toggleExpand(b);
   if (act === 'filter') { ui.filter[b.dataset.k] = b.dataset.v; return render(); }
   if (act === 'theme') { const v = b.dataset.v; pref('vigia-theme', v === 'auto' ? null : v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; return render(); }
   if (act === 'lang') { pref('vigia-lang', b.dataset.v === 'auto' ? null : b.dataset.v); return render(); }
 });
+function toggleExpand(b) {
+  const k = b.dataset.key, open = !ui.open.has(k);
+  if (open) ui.open.add(k); else ui.open.delete(k);
+  b.classList.toggle('open', open); b.setAttribute('aria-expanded', String(open));
+}
+root.addEventListener('keydown', e => {
+  const b = e.target.closest?.('[data-act="expand"]');
+  if (b && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleExpand(b); }
+});
 root.addEventListener('change', e => { if (e.target.dataset.act === 'client') { ui.filter.client = e.target.value; render(); } });
 root.addEventListener('input', e => { if (e.target.id === 'q') { ui.filter.q = e.target.value; render(); } });
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { ui.html = ''; render(); window.scrollTo(0, 0); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 refresh();

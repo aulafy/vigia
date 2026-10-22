@@ -16,7 +16,7 @@ export const STR = {
     theme: 'Appearance', auto: 'Automatic', light: 'Light', dark: 'Dark', lang: 'Language', offline: 'Cannot reach Vigía. Showing the last data received.', updated: 'Updated',
     config: 'Configuration', heartbeat: 'Heartbeat', phoneAck: 'Acknowledge from phone', checkin: 'Check-ins and pushes', wordfence: 'Wordfence (WordPress)', password: 'Dashboard password',
     yes: 'yes', no: 'no', canary: 'Weekly test alert', every: 'every', days: 'days', off: 'off', docs: 'Documentation', install: 'Install as an app from your browser menu (Add to Home Screen).',
-    back: 'Back', websites: 'Websites', alertsFor: 'Open alerts', contact: 'Contact', inventory: 'Inventory reported', chainDown: 'ALERT CHANNELS FAILING: alerts may not be reaching you.',
+    back: 'Back', websites: 'Websites', justNow: 'just now', skip: 'Skip to content', authExpired: 'Your session expired. Reload the page to sign in again.', serverError: 'Vigía answered with an error', offlineBoot: 'Cannot reach Vigía. Check that it is running and that you are connected.', showMore: 'Show more', showLess: 'Show less', coverage: 'Coverage', alertsFor: 'Open alerts', contact: 'Contact', inventory: 'Inventory reported', chainDown: 'ALERT CHANNELS FAILING: alerts may not be reaching you.',
     invError: 'inventory.json cannot be read: Vigía is using the last valid copy.', clientsEmpty: 'No clients yet. Edit data/inventory.json.',
   },
   es: {
@@ -34,7 +34,7 @@ export const STR = {
     theme: 'Apariencia', auto: 'Automática', light: 'Clara', dark: 'Oscura', lang: 'Idioma', offline: 'No se puede contactar con Vigía. Se muestran los últimos datos recibidos.', updated: 'Actualizado',
     config: 'Configuración', heartbeat: 'Heartbeat', phoneAck: 'Confirmar desde el móvil', checkin: 'Check-ins e inventario', wordfence: 'Wordfence (WordPress)', password: 'Contraseña del panel',
     yes: 'sí', no: 'no', canary: 'Aviso de prueba semanal', every: 'cada', days: 'días', off: 'desactivado', docs: 'Documentación', install: 'Instálalo como app desde el menú del navegador (Añadir a pantalla de inicio).',
-    back: 'Volver', websites: 'Webs', alertsFor: 'Alertas abiertas', contact: 'Contacto', inventory: 'Inventario recibido', chainDown: 'FALLAN LOS CANALES DE AVISO: puede que no te lleguen las alertas.',
+    back: 'Volver', websites: 'Webs', justNow: 'ahora mismo', skip: 'Saltar al contenido', authExpired: 'La sesión ha caducado. Recarga la página para volver a entrar.', serverError: 'Vigía ha respondido con un error', offlineBoot: 'No se puede contactar con Vigía. Comprueba que está en marcha y que tienes conexión.', showMore: 'Ver más', showLess: 'Ver menos', coverage: 'Cobertura', alertsFor: 'Alertas abiertas', contact: 'Contacto', inventory: 'Inventario recibido', chainDown: 'FALLAN LOS CANALES DE AVISO: puede que no te lleguen las alertas.',
     invError: 'No se puede leer inventory.json: Vigía usa la última copia válida.', clientsEmpty: 'Aún no hay clientes. Edita data/inventory.json.',
   },
 };
@@ -58,7 +58,8 @@ export function category(key) {
 export function ago(t, lang, now = Date.now()) {
   if (!t) return strings(lang).never;
   const s = Math.max(0, (now - t) / 1000);
-  const v = s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
+  if (s < 60) return strings(lang).justNow;
+  const v = s < 5400 ? `${Math.max(1, Math.round(s / 60))} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
   return String(lang).startsWith('es') ? `hace ${v}` : `${v} ago`;
 }
 export const fmtBytes = n => (n == null ? '—' : n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : n >= 1e3 ? `${Math.round(n / 1e3)} kB` : `${n} B`);

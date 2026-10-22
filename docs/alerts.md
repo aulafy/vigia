@@ -10,7 +10,13 @@
 
 **Change alerts** (DNS records, registrar, transfer lock, redirects, new third-party scripts) compare against a baseline. Acknowledging one also **accepts the new value as the baseline**, so the same change does not alert again. The dashboard labels that button **Accept change**. Accept only changes you recognise.
 
-When a site comes back or a certificate is renewed, you receive a **RECOVERED** message. When a dependency is upgraded and OSV no longer reports it, the alert closes on its own. That closure is silent, except for P1s.
+When a site comes back or a certificate is renewed, you receive a **RECOVERED** message.
+
+**Getting worse pages again.** If an open alert's priority rises (a certificate goes from 10 days to 2, a domain drops under 7 days, an OSV finding turns out to be in KEV, or EPSS jumps), you are paged again and an earlier acknowledgement no longer counts.
+
+**Delivery is tracked.** Every P1/P2 remembers whether a channel confirmed it. P1s repeat every 10 minutes until acknowledged anyway. P2s that never got through, because of an outage, a restart or a crash, are retried every 10 minutes until one does.
+
+**Bursts.** When one check produces more than 3 messages, you get a single summary. Its acknowledge link (and button) acknowledges every alert in the summary at once. When a dependency is upgraded and OSV no longer reports it, the alert closes on its own. That closure is silent, except for P1s.
 
 ## ntfy (recommended)
 
@@ -59,6 +65,8 @@ By default you acknowledge a P1 in the dashboard. To do it straight from the not
 1. Make Vigía reachable over **HTTPS**, for example behind Caddy or Nginx, a Cloudflare Tunnel or Tailscale Funnel.
 2. Set `PUBLIC_URL=https://vigia.example.com`.
 3. Set `ACK_SECRET` to a random value: `openssl rand -hex 32`.
+
+Each link is bound to that alert instance and expires after `ACK_LINK_DAYS` (7). An old link cannot acknowledge a new occurrence of the same problem.
 
 P1 and P2 notifications then include an **Acknowledge** button in ntfy and a link in Telegram and the webhook. Each link is signed with HMAC-SHA256 for that alert only. It acknowledges that alert and nothing else, and it works without the dashboard password. Opening the link with GET shows a confirmation button, so Telegram previews or link scanners cannot acknowledge an alert by accident.
 

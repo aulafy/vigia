@@ -35,7 +35,7 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 6 h | **Domain registration** through RDAP: expiry, suspension (hold, redemption), removed transfer lock, changed registrar | Expires < 7 days or suspended: **P1** · < 30 days: P2 · lock removed: P2 · registrar changed: P1 on high criticality |
 | 15 min | **[CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)**: CVEs confirmed exploited in the wild, matched against the products in your inventory | High criticality: **P1**, otherwise P2 |
 | 30 min | **[OSV](https://osv.dev)**: known vulnerabilities in the exact versions of your dependencies (npm, Packagist, PyPI, Go, Maven, RubyGems, crates.io, Debian, Ubuntu, Alpine…) | In KEV, or critical on a high-criticality asset: **P1** · critical/high: P2 · other: P3 |
-| 15 min | **Firewalls, VPN and remote access** you declare (FortiGate, Palo Alto, Cisco ASA, Ivanti, NetScaler, SonicWall, BeyondTrust…): CISA KEV, vendor advisories (Fortinet, Palo Alto and Cisco PSIRT, INCIBE-CERT), administration interface reachable from the Internet, portal certificate | KEV or exploited advisory: **P1** · critical/high advisory: P2 · exposed management: P2 |
+| 15 min | **Firewalls, VPN and remote access** you declare (FortiGate, Palo Alto, Cisco ASA, Ivanti, NetScaler, SonicWall, BeyondTrust…): CISA KEV, vendor advisories (Fortinet, Palo Alto and Cisco PSIRT, INCIBE-CERT), researchers (Volexity, watchTowr, GreyNoise, Rapid7), scanning waves against the product, administration interface reachable from the Internet, portal certificate | KEV or exploited: **P1** · exposed *and* exploited: **P1** · critical/high or scanning wave: P2 · exposed management: P2 |
 | 2 h | **EPSS early warning**: probability of exploitation in the next 30 days for the CVEs in your open alerts | ≥ 50 %: raised to **P1** · ≥ 10 %: P3 raised to P2 |
 | 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
 | on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
@@ -54,6 +54,7 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **Change alerts learn.** The first time Vigía sees a site's nameservers, registrar or third-party scripts, it saves them as the baseline. When something differs, you get an alert with an **Accept change** button. If the change was yours, one tap makes it the new baseline. A DNS change has to show up twice in a row before it alerts, so a flaky resolver does not page you.
 - **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone.
 - **The front door first.** The firewall or VPN gateway is where most small-business breaches start, so for declared edge devices a KEV match is always P1 and vendor advisories arrive before KEV catches up. See [docs/edge.md](docs/edge.md).
+- **Nothing is lost on the way.** Every P1/P2 keeps its delivery status until a channel confirms it, and undelivered ones are retried. An alert that gets worse pages again. A check that keeps failing for one asset or feed becomes a P2 ("cannot check…"), because a blind spot is a problem too.
 - **Bursts are grouped.** When one check produces more than 3 messages at once, for example 30 sites on the same server going down, you get one summary instead of 30 pages. If Vigía's own connection drops, it notices and skips the uptime round instead of reporting every site as down.
 - **The watcher is watched.** If Vigía crashes, the machine goes off or the network drops, its heartbeat stops and an external service (healthchecks.io, Better Stack…) pages you. If a vulnerability feed stops updating, you get a P2 about that blind spot.
 - **So is the alert chain.** Each channel is retried and checked for real delivery. If one fails, the others tell you. If all fail, Vigía sends `/fail` to the heartbeat service, which reaches you by email or SMS. Once a week a **canary** alert asks you to acknowledge it. If nobody does, Vigía treats the chain as broken, because "the push was sent" does not prove that anyone saw it.
@@ -163,13 +164,16 @@ All settings are environment variables, which can live in `.env`:
 | `WORDFENCE_HOURS`, `WORDFENCE_URL` | `6`, the v3 production feed | How often to refresh the feed, and from where (a mirror, for example) |
 | `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed acknowledge links in P1 notifications |
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
-| `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`) |
+| `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`). Required when listening beyond localhost, Docker included |
 | `DIGEST_HOUR`, `DIGEST_TZ` | `9`, `Europe/Madrid` | When to send the daily digest |
 | `EPSS_P1`, `EPSS_P2` | `0.5`, `0.1` | EPSS thresholds for escalating alerts |
 | `ADVISORY_FEED_URLS` | — | `name=url,…` to replace or add advisory feeds |
 | `REPORT_BRAND` | — | Your company name on client reports |
 | `CONNECTIVITY_URLS` | Cloudflare trace, `1.1.1.1` | Probed before each uptime round. If none answers, Vigía is the one offline: the round is skipped instead of paging for every site. |
-| `CHECKIN_ALLOW_MASTER` | `true` | Set to `false` once every server uses its own key (`node server.mjs key <asset>`) |
+| `CHECKIN_ALLOW_MASTER` | `false` | Servers sign with their asset's key (`node server.mjs key <asset>`). Set `true` only while migrating from versions before 0.9 |
+| `ALLOW_NO_PASSWORD` | `false` | Vigía refuses to listen beyond localhost without `DASH_PASS`, unless this is `true` |
+| `ACK_LINK_DAYS` | `7` | Acknowledge links in notifications expire after this |
+| `EDGE_VERSION_DAYS`, `ADVISORY_MAX_AGE_DAYS` | `60`, `45` | Ask to confirm a firmware version after this; ignore older advisories and posts |
 | `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8` | Resolvers for the DNS check. Public resolvers avoid stale local caches and split-horizon answers. |
 | `VIGIA_INV`, `VIGIA_STATE` | `data/inventory.json`, `data/state.json` | File locations |
@@ -201,11 +205,12 @@ Be honest with your clients about what is covered:
 ## Development
 
 ```bash
-npm test          # unit tests (node:test, no dependencies)
+npm test          # unit and HTTP integration tests (node:test, no dependencies)
 ```
 
 - `server.mjs` holds the scheduler, the checks, the notifications and the HTTP server.
 - `lib.mjs` holds the pure logic: matching, priorities, validation and signatures. It is unit tested.
+- `alerts.mjs` holds the alert lifecycle (raise, escalate, group, deliver, retry), with the transport injected and the lifecycle tested without a network.
 - `i18n.mjs` holds the alert texts in English and Spanish.
 - `report.mjs` renders the monthly client report (pure functions).
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).

@@ -56,12 +56,18 @@ Add an `edge` list to any asset. An asset can also consist of edge devices only,
 | Check | Every | Alert |
 |---|---|---|
 | **CISA KEV**: the device's product has a vulnerability that is being exploited | 15 min | **Always P1**, whatever the asset's criticality: this is the front door. A new device is checked against the last 90 days of KEV. |
-| **Vendor advisories** from the Fortinet, Palo Alto and Cisco PSIRT feeds, plus INCIBE-CERT for every vendor | 15 min | Exploited in the wild: **P1** · critical or high (CVSS ≥ 7): P2 · other: P3 |
-| **Management reachable from the Internet** (TCP/TLS handshake at the `management` address, from Vigía) | 15 min | P2 until it is closed |
+| **Vendor advisories** from the Fortinet, Palo Alto and Cisco PSIRT feeds, plus INCIBE-CERT for every vendor | 15 min | Exploited in the wild (or a "0-day exploitation" post): **P1** · critical, high, CVSS ≥ 7 or pre-auth RCE: P2 · other: P3 |
+| **Researchers** for every device: Volexity, watchTowr Labs, GreyNoise, Rapid7 | 15 min | Same rules. A **scanning or reconnaissance wave** against the product (GreyNoise) is P2: attackers are looking for devices like yours, often before the vulnerability is public. |
+| **Management reachable from the Internet** (TCP/TLS handshake at the `management` address, from Vigía) | 15 min | P2 until it is closed · **P1** "exploitable from the Internet" while the device also has an exploited vulnerability (KEV or advisory) |
+| **Firmware version freshness** | 15 min | P3 when the declared `version` has not changed or been confirmed (`"checked": "YYYY-MM-DD"`) for `EDGE_VERSION_DAYS` (60) |
 | **Portal certificate** | 15 min | < 3 days: P1 · < 14 days: P2 |
 | **End-of-life firmware** (endoflife.date) | 6 h | Like any other software |
 
 Advisories are matched by **product**, not by vendor. A Fortinet bulletin about FortiSIEM, or "impact of the PHP vulnerability on our products", does not alert for a FortiGate. When the same CVE appears in several feeds, for example Fortinet's and INCIBE-CERT's, you get one alert, not two.
+
+Advisories and posts older than `ADVISORY_MAX_AGE_DAYS` (45) are ignored, so a device added today is not flooded with last year's research.
+
+**Patch and check for compromise.** Edge flaws are often exploited for weeks before anyone publishes them (BeyondTrust Remote Support: about 47 days; Ivanti Connect Secure: about 10). So every alert about an *exploited* edge vulnerability says it plainly: patching closes the door, but you also need to check whether someone already came in. Look at the vendor's integrity tool or IOCs, unknown admin accounts and unexpected configuration changes.
 
 KEV entries and advisories carry no exact version ranges in a form that can be matched reliably, so these alerts show **your declared version** next to the link to the vendor advisory. Check the "affected versions" table there. If you are not affected, acknowledge the alert.
 
@@ -86,4 +92,6 @@ EPSS never lowers a priority. The score is shown in the alert title: "(EPSS 91 %
 |---|---|---|
 | `EPSS_P1`, `EPSS_P2` | `0.5`, `0.1` | Escalation thresholds |
 | `EPSS_URL` | FIRST API | Override, for a mirror |
+| `EDGE_VERSION_DAYS` | `60` | Ask to confirm a declared firmware version after this |
+| `ADVISORY_MAX_AGE_DAYS` | `45` | Ignore advisories and research posts older than this |
 | `ADVISORY_FEED_URLS` | — | `name=url,name=url`. Replaces or adds advisory feeds, for a mirror or your national CERT. A custom feed name is used by devices that list it in `feeds`. |

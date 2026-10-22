@@ -13,7 +13,8 @@
 #   --runtimes          versions of php, node, nginx, apache, mysql/mariadb, postgresql, redis, openssl found on PATH
 #   --dry-run           print the JSON instead of sending it
 #
-# Environment: VIGIA_URL, VIGIA_CHECKIN_SECRET (same as CHECKIN_SECRET on the server)
+# Environment: VIGIA_URL, VIGIA_CHECKIN_SECRET (this asset's key: `node server.mjs key <asset-id>` on the Vigía host,
+#              never the master CHECKIN_SECRET)
 #
 # Example (cron, daily):
 #   15 3 * * * VIGIA_URL=https://vigia.example.com VIGIA_CHECKIN_SECRET=… /usr/local/bin/vigia-collect.sh acme-shop --wp /var/www/html --os --runtimes

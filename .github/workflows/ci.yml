@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs && node --check report.mjs && for f in public/*.js scripts/*.mjs; do node --check "$f"; done
+      - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs && node --check report.mjs && node --check alerts.mjs && for f in public/*.js scripts/*.mjs; do node --check "$f"; done
       - run: npm test
       - run: sh -n deploy/vigia-checkin.sh && sh -n deploy/vigia-collect.sh
       - run: node -e "JSON.parse(require('fs').readFileSync('inventory.example.json','utf8'))"
@@ -24,10 +24,11 @@ jobs:
       - run: docker build -t vigia .
       - name: Smoke-test the container
         run: |
-          docker run -d --name vigia -p 4848:4848 -e CANARY_DAYS=0 vigia
+          docker run -d --name vigia -p 4848:4848 -e CANARY_DAYS=0 -e DASH_PASS=ci vigia
           for i in $(seq 1 30); do curl -fs localhost:4848/healthz && break; sleep 1; done
-          curl -fs localhost:4848/ | grep -q '<title>Vigía</title>'
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:4848/)" = 401
+          curl -fs -u vigia:ci localhost:4848/ | grep -q '<title>Vigía</title>'
           curl -fs localhost:4848/app.js > /dev/null
           curl -fs localhost:4848/manifest.webmanifest | grep -q '"name": "Vigía"'
-          curl -fs localhost:4848/api/state | grep -q '"version"'
+          curl -fs -u vigia:ci -H 'x-vigia-ui: 1' localhost:4848/api/state | grep -q '"version"'
           docker logs vigia

@@ -5,7 +5,8 @@
 #
 # Environment:
 #   VIGIA_URL               e.g. https://vigia.example.com
-#   VIGIA_CHECKIN_SECRET    same value as CHECKIN_SECRET on the Vigía server
+#   VIGIA_CHECKIN_SECRET    this asset's key: run `node server.mjs key <asset-id>` on the Vigía host.
+#                           Never the master CHECKIN_SECRET: a key only works for its own asset.
 #
 # Examples:
 #   vigia-checkin.sh acme-shop db success '{"bytes":123456789}'

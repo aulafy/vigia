@@ -7,9 +7,9 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Resolver } from 'node:dns/promises';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import crypto from 'node:crypto';
 import * as L from './lib.mjs';
+import { createAlerts } from './alerts.mjs';
 import { messages } from './i18n.mjs';
 import { renderReport, previousMonth, monthRange } from './report.mjs';
 
@@ -29,14 +29,14 @@ const {
   NTFY_TOPIC, NTFY_SERVER = 'https://ntfy.sh', NTFY_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_URL,
   HEARTBEAT_URL, PUBLIC_URL, ACK_SECRET, DIGEST_HOUR = '9', DIGEST_TZ = process.env.TZ_DIGEST || 'Europe/Madrid',
   DNS_SERVERS = '1.1.1.1,8.8.8.8', HEARTBEAT_FAIL_URL, CHECKIN_SECRET, CANARY_DAYS = '7', CANARY_ACK_HOURS = '24',
-  CONNECTIVITY_URLS = 'https://www.cloudflare.com/cdn-cgi/trace,https://1.1.1.1/', CHECKIN_ALLOW_MASTER = 'true', DASH_HOSTS = '',
+  CONNECTIVITY_URLS = 'https://www.cloudflare.com/cdn-cgi/trace,https://1.1.1.1/', CHECKIN_ALLOW_MASTER = 'false', DASH_HOSTS = '',
+  ALLOW_NO_PASSWORD = 'false', ACK_LINK_DAYS = '7', EDGE_VERSION_DAYS = '60', ADVISORY_MAX_AGE_DAYS = '45',
   EPSS_P1 = '0.5', EPSS_P2 = '0.1', EPSS_URL = 'https://api.first.org/data/v1/epss', ADVISORY_FEED_URLS = '', REPORT_BRAND = '',
   WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
-const REPEAT_P1_MS = 10 * 60_000;
 const VERSION = JSON.parse(fs.readFileSync(path.join(DIR, 'package.json'), 'utf8')).version;
 const UA = { 'user-agent': `vigia/${VERSION} (+https://github.com/aulafy/vigia)` };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
@@ -53,7 +53,7 @@ if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'
 
 // domain / dns / web hold the baselines that change alerts compare against
 let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
-  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {} };
+  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {} };
 if (fs.existsSync(STATE_F)) {
   try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; }
   catch (e) {
@@ -63,14 +63,24 @@ if (fs.existsSync(STATE_F)) {
     log(`WARNING: ${STATE_F} unreadable (${e.message}), moved to ${bad}; starting with empty state`);
   }
 }
-// Atomic write: a crash mid-write cannot corrupt the state file
-const save = () => { fs.writeFileSync(STATE_F + '.tmp', JSON.stringify(state, null, 1)); fs.renameSync(STATE_F + '.tmp', STATE_F); };
+// Durable write: temp file + fsync + rename + fsync of the folder, so neither a crash nor a power cut leaves half a file
+function writeAtomic(file, data) {
+  const tmp = `${file}.tmp`, fd = fs.openSync(tmp, 'w');
+  try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);
+  try { const d = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch {} // not supported everywhere
+}
+let saveErr = null;
+function save() {
+  try { writeAtomic(STATE_F, JSON.stringify(state)); if (saveErr) log('state is being saved again'); saveErr = null; }
+  catch (e) { if (!saveErr) log('CANNOT SAVE STATE:', e.message); saveErr = e.message; }
+}
 
 // Inventories pushed by collectors live in their own file: they can be large and only change on a push
 const PUSHED_F = process.env.VIGIA_PUSHED || path.join(DATA, 'pushed.json');
 let pushed = {}, pushedVer = 0;
 try { pushed = JSON.parse(fs.readFileSync(PUSHED_F, 'utf8')); } catch {}
-const savePushed = () => { pushedVer++; fs.writeFileSync(PUSHED_F + '.tmp', JSON.stringify(pushed)); fs.renameSync(PUSHED_F + '.tmp', PUSHED_F); };
+const savePushed = () => { pushedVer++; try { writeAtomic(PUSHED_F, JSON.stringify(pushed)); } catch (e) { log('cannot save pushed inventory:', e.message); saveErr = e.message; } };
 
 // Edits to inventory.json apply without a restart: the file is re-read when it changes (or after a push).
 // A file that does not parse never empties the inventory: the last good copy stays in use and a P2 says so.
@@ -94,6 +104,26 @@ function inventory({ includePaused = false } = {}) {
   return includePaused ? inv$.assets : inv$.assets.filter(a => !a.paused);
 }
 
+// Read at most `max` bytes of a response and drop the rest: a huge or endless page must not exhaust memory
+async function readCapped(r, max = 3_000_000) {
+  const reader = r.body?.getReader();
+  if (!reader) return '';
+  const chunks = [];
+  let size = 0;
+  try { while (size < max) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); size += value.length; } }
+  finally { reader.cancel().catch(() => {}); }
+  return Buffer.concat(chunks).subarray(0, max).toString('utf8');
+}
+
+// Coverage: a check that keeps failing for one asset (or one feed) is a blind spot, even when the rest of the run succeeds
+const COVER_AFTER = 3;
+function cover(kind, id, ok, err, asset = null, label = id) {
+  const k = `${kind}:${id}`, c = state.coverage[k] ||= { fails: 0 };
+  if (ok) { if (c.fails) resolve(`cover:${k}`, T.coverageOk(kind, label)); Object.assign(c, { fails: 0, okAt: Date.now(), err: null }); return; }
+  Object.assign(c, { fails: c.fails + 1, err: String(err || '').slice(0, 200), failAt: Date.now() });
+  if (c.fails >= COVER_AFTER) raise(`cover:${k}`, 'P2', T.coverage(kind, label), T.coverageBody(c.err, c.fails, c.okAt), asset);
+}
+
 async function getJSON(url, opts = {}) {
   const r = await fetch(url, { headers: UA, signal: AbortSignal.timeout(30_000), ...opts });
   if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
@@ -101,8 +131,13 @@ async function getJSON(url, opts = {}) {
 }
 
 // ---------- Notifications ----------
-const ackUrl = key => PUBLIC_URL && ACK_SECRET
-  ? `${PUBLIC_URL.replace(/\/$/, '')}/api/ack?key=${encodeURIComponent(key)}&sig=${L.signAck(key, ACK_SECRET)}` : null;
+// Acknowledge links are bound to one alert instance (its creation time) and expire, so a leaked link cannot silence a future alert
+function ackUrl(key) {
+  const first = alerts.firstOf(key);
+  if (!PUBLIC_URL || !ACK_SECRET || first == null) return null;
+  const exp = Date.now() + +ACK_LINK_DAYS * 864e5;
+  return `${PUBLIC_URL.replace(/\/$/, '')}/api/ack?key=${encodeURIComponent(key)}&f=${first}&e=${exp}&sig=${L.signAck(L.ackPayload(key, first, exp), ACK_SECRET)}`;
+}
 
 // Each channel: retried, and checked for real delivery (not just HTTP 200)
 async function deliver(name, url, payload, headers = {}) {
@@ -138,11 +173,11 @@ async function failHeartbeat(reason) {
 }
 
 async function notify(prio, title, body, key) {
-  if (prio === 'P3') return;
+  if (prio === 'P3') return { sent: 0, failed: 0, total: 0 };
   const ack = key && key !== 'test' ? ackUrl(key) : null;
   log(`[${prio}] ${title} — ${body}`);
   const list = channels(prio, title, body, ack);
-  if (!list.length) return;
+  if (!list.length) return { sent: 0, failed: 0, total: 0 };
   const results = await Promise.allSettled(list.map(([, send]) => send()));
   const failed = [];
   results.forEach((r, i) => {
@@ -152,7 +187,8 @@ async function notify(prio, title, body, key) {
   });
   if (failed.length === list.length) {
     state.chain = { ok: false, at: Date.now(), err: failed.map(n => state.channels[n].err).join('; ') };
-    return failHeartbeat(`all alert channels failed — ${state.chain.err}`);
+    await failHeartbeat(`all alert channels failed — ${state.chain.err}`);
+    return { sent: 0, failed: failed.length, total: list.length, errors: failed.map(n => state.channels[n].err) };
   }
   state.chain = { ok: true, at: Date.now() };
   // channel alerts go out through the channels that still work (raise deduplicates, so no loop)
@@ -160,64 +196,14 @@ async function notify(prio, title, body, key) {
     if (failed.includes(name)) raise(`channel:${name}`, 'P2', T.channelDown(name), T.channelDownBody(state.channels[name].err), null);
     else if (state.alerts[`channel:${name}`]) resolve(`channel:${name}`, T.channelOk(name));
   }
+  return { sent: list.length - failed.length, failed: failed.length, total: list.length };
 }
 
-// ---------- Grouping ----------
-// Everything one scheduled run would send is collected; more than BURST messages become one summary
-// (30 sites on one server going down at once is one page, not thirty).
-const BURST = 3;
-const burst = new AsyncLocalStorage();
-function send(prio, title, body, key) {
-  const q = burst.getStore();
-  if (q) q.push({ prio, title, body, key });
-  else notify(prio, title, body, key);
-}
-function flush(name, q) {
-  const real = q.filter(x => x.prio !== 'P3');
-  if (real.length <= BURST) { for (const x of real) notify(x.prio, x.title, x.body, x.key); return; }
-  const top = real.sort((a, b) => a.prio.localeCompare(b.prio)).slice(0, 8).map(x => `• ${x.prio} ${x.title}`).join('\n');
-  notify(real.some(x => x.prio === 'P1') ? 'P1' : 'P2', T.burst(real.length, name), top + (real.length > 8 ? `\n${T.more}` : ''));
-}
-
-// ---------- History (for the monthly report) ----------
+// ---------- Alert lifecycle (alerts.mjs: raise, escalate, group, deliver, retry) ----------
+const alerts = createAlerts({ state, T, notify, applyAccept: L.applyAccept, save });
+const { raise, resolve, send, onboard, histNote } = alerts;
+const ackAlert = key => alerts.ack(key);
 const monthOf = (t = Date.now()) => L.localClock(DIGEST_TZ, new Date(t)).day.slice(0, 7);
-const histOf = a => { for (let i = state.history.length - 1; i >= 0; i--) { const h = state.history[i]; if (h.key === a.key && h.first === a.first) return h; } return null; };
-function histNote(a, fields) { const h = histOf(a); if (h) Object.assign(h, fields); }
-
-// ---------- Alert lifecycle ----------
-// Assets in their first scan of a given kind: findings are stored silently and summarised in one message.
-const onboarding = {}; // kind -> Set(assetId)
-const inOnboarding = (key, asset) => Object.entries(onboarding).some(([k, s]) => key.startsWith(k + ':') && s.has(asset));
-
-// raise: create an alert (deduplicated by key). Unacknowledged P1s are repeated by the health loop.
-// `accept` turns it into a change alert: acknowledging it makes the new value the baseline.
-function raise(key, prio, title, body, asset, accept) {
-  const now = Date.now(), a = state.alerts[key];
-  if (accept) body = `${body} ${T.acceptHint}`;
-  if (!a) {
-    state.alerts[key] = { key, prio, title, body, asset, first: now, sentAt: now, ack: false, ...(accept && { accept }) };
-    state.history.push({ key, prio, title, asset, first: now });
-    if (inOnboarding(key, asset)) state.alerts[key].ack = prio !== 'P1'; // P1s still ring
-    else send(prio, title, body, key);
-  } else Object.assign(a, { title, body }, accept && { accept });
-}
-
-function ackAlert(key) {
-  const a = state.alerts[key];
-  if (!a) return;
-  histNote(a, { ackAt: a.ackAt || Date.now(), ...(a.accept && { resolvedAt: Date.now(), accepted: true }) });
-  if (a.accept) { L.applyAccept(state, a.accept); delete state.alerts[key]; }
-  else { a.ack = true; a.ackAt ||= Date.now(); }
-  save();
-}
-
-function resolve(key, msg, { quiet = false } = {}) {
-  const a = state.alerts[key];
-  if (!a) return;
-  delete state.alerts[key];
-  histNote(a, { resolvedAt: Date.now() });
-  if (!quiet && a.prio !== 'P3') send('P2', T.recovered(a.title), msg || '');
-}
 
 // Close alerts of one kind that the latest complete scan no longer reports
 function prune(kind, assetIds, foundKeys, msg) {
@@ -225,27 +211,9 @@ function prune(kind, assetIds, foundKeys, msg) {
     if (a.key.startsWith(kind + ':') && assetIds.has(a.asset) && !foundKeys.has(a.key)) resolve(a.key, msg, { quiet: a.prio !== 'P1' });
 }
 
-function onboard(inv, kind, fn) {
-  const fresh = new Set(inv.filter(a => !state.scanned[`${kind}:${a.id}`]).map(a => a.id));
-  const t0 = Date.now();
-  onboarding[kind] = fresh;
-  return fn().then(() => {
-    delete onboarding[kind];
-    if (!fresh.size) return;
-    for (const id of fresh) state.scanned[`${kind}:${id}`] = Date.now(); // only after a complete scan
-    const found = Object.values(state.alerts).filter(a => fresh.has(a.asset) && a.key.startsWith(kind + ':') && a.first >= t0);
-    if (!found.length) return;
-    const c = { P1: 0, P2: 0, P3: 0 };
-    found.forEach(a => c[a.prio]++);
-    if (!c.P1 && !c.P2) return; // P3-only findings wait for the daily digest
-    const names = inv.filter(a => found.some(x => x.asset === a.id)).map(a => `${a.client}/${a.name}`).join(', ');
-    send(c.P1 ? 'P1' : 'P2', T.onboard(kind, found.length), T.onboardBody(names, c));
-  }, e => { delete onboarding[kind]; throw e; });
-}
-
 // ---------- Uptime + TLS (every 60 s) ----------
-const tlsDays = host => new Promise(res => {
-  const s = tls.connect(443, host, { servername: host, timeout: 8000 }, () => {
+const tlsDays = (host, port = 443) => new Promise(res => {
+  const s = tls.connect(port, host, { servername: net.isIP(host) ? undefined : host, timeout: 8000 }, () => {
     const c = s.getPeerCertificate(); s.end();
     res(c?.valid_to ? Math.floor((new Date(c.valid_to) - Date.now()) / 864e5) : null);
   });
@@ -260,7 +228,7 @@ async function checkAsset(a) {
   try {
     const r = await fetch(a.url || `https://${a.domain}`, { redirect: 'follow', signal: AbortSignal.timeout(a.timeoutMs || 10_000), headers: UA });
     code = r.status; ok = code < 400;
-    if (ok && a.expect) { if (!(await r.text()).includes(a.expect)) { ok = false; why = T.expectMissing(a.expect); } }
+    if (ok && a.expect) { if (!(await readCapped(r)).includes(a.expect)) { ok = false; why = T.expectMissing(a.expect); } }
     else await r.body?.cancel();
     if (!ok && !why) why = `HTTP ${code}`;
   } catch (e) { why = e.cause?.code || e.name || e.message; }
@@ -268,15 +236,16 @@ async function checkAsset(a) {
   const av = ((state.avail[a.id] ||= {})[monthOf()] ||= [0, 0]);
   av[0]++; if (ok) av[1]++;
   const key = `down:${a.id}`;
+  st.lastProbeOk = ok;
   if (ok) { st.fails = 0; st.ok = true; resolve(key, T.up(a, st.ms)); }
   else {
-    st.fails++; st.ok = false;
-    if (st.fails >= (a.failThreshold || 2)) raise(key, L.downPriority(a.criticality), T.down(a), T.downBody(a, why, st.fails), a.id);
+    st.fails++;
+    if (st.fails >= (a.failThreshold || 2)) { st.ok = false; raise(key, L.downPriority(a.criticality), T.down(a), T.downBody(a, why, st.fails), a.id); }
   }
   // TLS once per hour, on the host actually served (url) or the domain
-  const tlsHost = a.url?.startsWith('https://') ? new URL(a.url).hostname : a.url ? null : a.domain;
+  const tu = a.url?.startsWith('https://') ? new URL(a.url) : null, tlsHost = tu ? tu.hostname : a.url ? null : a.domain, tlsPort = +(tu?.port || 443);
   if (tlsHost && (!st.tlsAt || Date.now() - st.tlsAt > 3600_000)) {
-    st.tlsAt = Date.now(); st.tlsDays = (await tlsDays(tlsHost)) ?? (await tlsDays(tlsHost)); // one retry: a blip is not an alert
+    st.tlsAt = Date.now(); st.tlsDays = (await tlsDays(tlsHost, tlsPort)) ?? (await tlsDays(tlsHost, tlsPort)); // one retry: a blip is not an alert
     const k = `tls:${a.id}`, p = st.tlsDays === null ? null : L.tlsPriority(st.tlsDays);
     // a site that is down already has a down: alert, do not duplicate it
     if (st.tlsDays === null) { if (st.ok) raise(k, 'P2', T.tlsUnreadable(a), T.tlsUnreadableBody({ ...a, domain: tlsHost }), a.id); }
@@ -292,7 +261,8 @@ async function checkKEV(inv) {
   kevSet = new Set(j.vulnerabilities.map(v => v.cveID));
   const seen = new Set(state.kev.seen), first = !state.kev.seeded, checked = state.kev.checked || {};
   const hit = (v, a, s) => raise(`kev:${v.cveID}:${a.id}`, s.edge ? 'P1' : L.kevPriority(a.criticality), T.kev(v),
-    `${T.kevBody(a, s, v)}${(v.notes || '').match(/https?:\/\/[^\s;]+/)?.[0] ? ` ${(v.notes || '').match(/https?:\/\/[^\s;]+/)[0]}` : ''}`, a.id);
+    `${T.kevBody(a, s, v)}${s.edge ? ` ${T.huntHint}` : ''}${(v.notes || '').match(/https?:\/\/[^\s;]+/)?.[0] ? ` ${(v.notes || '').match(/https?:\/\/[^\s;]+/)[0]}` : ''}`,
+    a.id, null, { term: L.kevTerm(s), ...(s.edge && { dev: `${a.id}:${s.edgeIndex}` }) });
   // 1. entries added since the last run, against every asset
   for (const v of j.vulnerabilities) {
     if (seen.has(v.cveID)) continue;
@@ -303,14 +273,16 @@ async function checkKEV(inv) {
   //    (name-only matching: older entries are mostly patched and would be noise; OSV/Wordfence cover exact versions)
   const recent = j.vulnerabilities.filter(v => Date.now() - new Date(v.dateAdded) < 90 * 864e5);
   for (const a of inv) {
-    const done = new Set(checked[a.id] || []);
+    const done = new Set(checked[a.id] || []), current = new Set(a.stack.map(L.kevTerm).filter(Boolean));
     for (const s of a.stack) {
       const term = L.kevTerm(s);
       if (!term || done.has(term)) continue;
       for (const v of recent) if (L.kevMatches(v, s)) hit(v, a, s);
       done.add(term);
     }
-    checked[a.id] = [...done];
+    // a product removed and added back later is checked again; its old alerts close quietly
+    checked[a.id] = [...done].filter(t => current.has(t));
+    for (const al of Object.values(state.alerts)) if (al.key.startsWith('kev:') && al.asset === a.id && al.term && !current.has(al.term)) resolve(al.key, '', { quiet: true });
   }
   state.kev = { seen: [...seen], seeded: true, checked };
 }
@@ -329,6 +301,20 @@ async function osvDetails(id) {
   } catch (e) { log('osv detail', id, e.message); return c || { sev: '', cves: id.startsWith('CVE-') ? [id] : [], sum: id }; }
 }
 
+// querybatch answers at most 1,000 vulnerabilities per package (3,000 per batch): follow next_page_token to the end
+async function osvBatch(queries) {
+  const out = queries.map(() => []);
+  let todo = queries.map((q, i) => ({ i, q }));
+  for (let page = 0; todo.length && page < 50; page++) {
+    const r = await getJSON('https://api.osv.dev/v1/querybatch', { method: 'POST', headers: { ...UA, 'content-type': 'application/json' }, body: JSON.stringify({ queries: todo.map(t => t.q) }) });
+    const next = [];
+    todo.forEach((t, k) => { const res = r.results?.[k] || {}; out[t.i].push(...(res.vulns || [])); if (res.next_page_token) next.push({ i: t.i, q: { ...t.q, page_token: res.next_page_token } }); });
+    todo = next;
+  }
+  if (todo.length) throw new Error('OSV kept paginating beyond 50 pages');
+  return out;
+}
+
 async function checkOSV(inv) {
   // Each package version is queried once, however many assets share it (pushed inventories make this matter)
   const uses = new Map(), assets = new Set();
@@ -341,13 +327,10 @@ async function checkOSV(inv) {
   const q = [...uses.values()], found = new Set();
   for (let i = 0; i < q.length; i += 500) {
     const chunk = q.slice(i, i + 500);
-    const r = await getJSON('https://api.osv.dev/v1/querybatch', {
-      method: 'POST', headers: { ...UA, 'content-type': 'application/json' },
-      body: JSON.stringify({ queries: chunk.map(({ s }) => ({ package: { name: s.name, ecosystem: s.ecosystem }, version: s.version })) }),
-    });
-    const ids = [...new Set(r.results.flatMap(x => (x?.vulns || []).map(v => v.id)))];
+    const results = await osvBatch(chunk.map(({ s }) => ({ package: { name: s.name, ecosystem: s.ecosystem }, version: s.version })));
+    const ids = [...new Set(results.flatMap(vs => vs.map(v => v.id)))];
     const details = Object.fromEntries((await L.pool(ids, 8, osvDetails)).map((d, i) => [ids[i], d]));
-    for (let k = 0; k < chunk.length; k++) for (const v of r.results[k]?.vulns || []) {
+    for (let k = 0; k < chunk.length; k++) for (const v of results[k]) {
       const { s, users } = chunk[k], d = details[v.id], inKev = d.cves.some(c => kevSet.has(c));
       for (const a of users) {
         const key = `osv:${v.id}:${a.id}:${s.name}`;
@@ -404,9 +387,16 @@ const FEEDS = {
   paloalto: 'https://security.paloaltonetworks.com/rss.xml',
   cisco: 'https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml',
   incibe: 'https://www.incibe.es/incibe-cert/alerta-temprana/avisos/feed',
+  // researchers who publish in-the-wild exploitation and scanning waves against edge devices, read for every device
+  volexity: 'https://www.volexity.com/feed/',
+  watchtowr: 'https://labs.watchtowr.com/rss/',
+  greynoise: 'https://www.greynoise.io/blog/rss.xml',
+  rapid7: 'https://www.rapid7.com/blog/rss/',
   // "name=url,name=url" replaces or adds feeds (mirrors, or another CERT)
   ...Object.fromEntries(ADVISORY_FEED_URLS.split(',').map(x => x.trim().split(/=(.*)/s)).filter(([k, v]) => k && v)),
 };
+const RESEARCH = ['volexity', 'watchtowr', 'greynoise', 'rapid7'];
+const SOURCE = { fortinet: 'Fortinet PSIRT', paloalto: 'Palo Alto PSIRT', cisco: 'Cisco PSIRT', incibe: 'INCIBE-CERT', volexity: 'Volexity', watchtowr: 'watchTowr Labs', greynoise: 'GreyNoise', rapid7: 'Rapid7' };
 const shortHash = x => crypto.createHash('sha1').update(String(x)).digest('hex').slice(0, 12);
 
 // Reachability only: does anything complete a TCP (and for https, TLS) handshake at the address you declared?
@@ -429,36 +419,44 @@ const certDays = url => new Promise(res => {
 });
 
 async function checkEdge(inv) {
-  const devices = inv.flatMap(a => a.stack.filter(s => s.edge).map(s => ({ a, s, dev: `${a.id}:${s.edgeIndex}` })));
+  const devices = inv.flatMap(a => a.stack.filter(s => s.edge).map(s => ({ a, s, dev: `${a.id}:${s.edgeIndex}`, feeds: [...new Set([...s.feeds, ...RESEARCH])] })));
   if (!devices.length) return;
-  // only the feeds some device needs; one failing feed does not stop the others
-  const needed = [...new Set(devices.flatMap(d => d.s.feeds))].filter(f => FEEDS[f]), items = {};
-  const errs = [];
+  // only the feeds some device needs; one failing feed does not stop the others, but three failures in a row are a P2
+  const needed = [...new Set(devices.flatMap(d => d.feeds))].filter(f => FEEDS[f]), items = {};
+  let failed = 0, lastErr = '';
   await L.pool(needed, 4, async f => {
-    try { const r = await fetch(FEEDS[f], { headers: UA, signal: AbortSignal.timeout(30_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); items[f] = L.parseFeed(await r.text()); }
-    catch (e) { errs.push(`${f}: ${e.message}`); }
+    try {
+      const r = await fetch(FEEDS[f], { headers: UA, signal: AbortSignal.timeout(30_000) });
+      if (!r.ok) { await r.body?.cancel(); throw new Error(`HTTP ${r.status}`); }
+      items[f] = L.parseFeed(await readCapped(r, 8_000_000));
+      cover('feed', f, true, null, null, SOURCE[f] || f);
+    } catch (e) { failed++; lastErr = `${f}: ${e.message}`; cover('feed', f, false, e.message, null, SOURCE[f] || f); }
   });
-  if (needed.length && errs.length === needed.length) throw new Error(`no advisory feed reachable — ${errs.join('; ')}`);
-  state.feeds.edgePartialErr = errs.length ? errs.join('; ') : null;
+  if (needed.length && failed === needed.length) throw new Error(`no advisory feed reachable — ${lastErr}`);
+  // old posts are history, not news: a device added today must not page for last year's research
+  const fresh = it => !it.date || Date.now() - it.date < +ADVISORY_MAX_AGE_DAYS * 864e5;
 
   const isOnline = await online();
-  await L.pool(devices, 6, async ({ a, s, dev }) => {
-    // 1. advisories: new to this device, and not a CVE this device was already alerted about (feeds overlap)
+  await L.pool(devices, 6, async ({ a, s, dev, feeds }) => {
+    // 1. advisories: new to this device, recent, and not a CVE this device was already alerted about (feeds overlap)
     const done = state.adv[dev] ||= { ids: [], cves: [] };
-    for (const f of s.feeds) for (const it of items[f] || []) {
+    for (const f of feeds) for (const it of items[f] || []) {
       if (done.ids.includes(it.id) || !L.advisoryMatches(it, s)) continue;
       done.ids.push(it.id);
-      if (it.cves.length && it.cves.every(c => done.cves.includes(c))) continue;
+      if (!fresh(it) || (it.cves.length && it.cves.every(c => done.cves.includes(c)))) continue;
       done.cves.push(...it.cves);
       const sev = L.advisorySeverity(it);
-      raise(`adv:${dev}:${shortHash(it.id)}`, sev.prio, T.adv(a, s, it, sev.exploited), T.advBody(a, s, it, f), a.id);
+      raise(`adv:${dev}:${shortHash(it.id)}`, sev.prio, sev.recon ? T.advRecon(a, s, it) : T.adv(a, s, it, sev.exploited),
+        `${T.advBody(a, s, it, SOURCE[f] || f)}${sev.exploited ? ` ${T.huntHint}` : ''}`, a.id, null, { dev, ...(sev.exploited && { exploited: true }) });
     }
     done.ids = done.ids.slice(-1000); done.cves = done.cves.slice(-2000);
 
-    // 2. management interface reachable from the Internet (skipped while Vigía itself is offline)
+    // 2. management interface reachable from the Internet (skipped while Vigía itself is offline).
+    //    Exposed AND exploited right now is the worst case for a small business: one P1, not two separate alerts.
     if (s.management && isOnline) {
       const k = `edge:mgmt:${dev}`;
-      if (await reachable(s.management)) raise(k, 'P2', T.mgmtExposed(a, s), T.mgmtExposedBody(s), a.id);
+      const exploited = Object.values(state.alerts).some(x => x.dev === dev && !x.key.startsWith('edge:') && (x.exploited || x.key.startsWith('kev:')));
+      if (await reachable(s.management)) raise(k, exploited ? 'P1' : 'P2', exploited ? T.mgmtExposedExploited(a, s) : T.mgmtExposed(a, s), T.mgmtExposedBody(s), a.id, null, { dev });
       else resolve(k, T.mgmtClosed);
     }
     // 3. portal certificate
@@ -466,6 +464,12 @@ async function checkEdge(inv) {
       const days = await certDays(s.portal), p = days === null ? null : L.tlsPriority(days), k = `edge:tls:${dev}`;
       if (p) raise(k, p, T.edgeTls(a, s, days), s.portal, a.id); else if (days !== null) resolve(k, T.tlsRenewed);
     }
+    // 4. a declared firmware version nobody has confirmed for weeks is probably wrong: matching would run on stale data
+    const seen = state.edgeSeen[dev];
+    if (!seen || seen.version !== s.version) state.edgeSeen[dev] = { version: s.version, since: Date.now() };
+    const confirmed = Date.parse(s.checked || '') || state.edgeSeen[dev].since, ageDays = Math.floor((Date.now() - confirmed) / 864e5);
+    if (s.version && ageDays > +EDGE_VERSION_DAYS) raise(`edge:version:${dev}`, 'P3', T.edgeVersionOld(a, s, ageDays), T.edgeVersionOldBody(s), a.id, null, { dev });
+    else resolve(`edge:version:${dev}`, '', { quiet: true });
   });
 }
 
@@ -484,18 +488,17 @@ async function checkEpss() {
     a.epss = e;
     const p = L.epssPriority(a.prio, e, { p1: +EPSS_P1, p2: +EPSS_P2 });
     if (p === a.prio) continue;
-    // the risk changed, so an earlier acknowledgement no longer covers it
-    Object.assign(a, { prio: p, ack: false, sentAt: Date.now() });
-    histNote(a, { prio: p });
-    send(p, T.epssUp(a.title, e), a.body, a.key);
+    alerts.escalate(a, p, T.epssUp(a.title, e)); // the risk changed: an earlier acknowledgement no longer covers it
   }
   for (const [c, v] of Object.entries(state.epss)) if (Date.now() - v.at > 7 * 864e5) delete state.epss[c];
 }
 
 // ---------- Pushed inventory: freshness (every 15 min) ----------
 async function checkInventoryAge(inv) {
+  let changed = false;
+  for (const a of inv) if (a.inventoryMaxAgeHours && !pushed[a.id]) { pushed[a.id] = { since: Date.now() }; changed = true; }
+  if (changed) savePushed();
   for (const a of inv) {
-    if (a.inventoryMaxAgeHours && !pushed[a.id]) { pushed[a.id] = { since: Date.now() }; savePushed(); }
     const f = L.inventoryStale(a, pushed[a.id]);
     if (f) raise(`inv:stale:${a.id}`, 'P2', T.invStale(a), T.invStaleBody(f), a.id);
     else resolve(`inv:stale:${a.id}`, '', { quiet: true });
@@ -510,7 +513,8 @@ async function checkEOL(inv) {
     if (!s.eol || !s.version) continue;
     lookups++;
     scanned.add(a.id);
-    const cycles = cache[s.eol] ??= await getJSON(`https://endoflife.date/api/${encodeURIComponent(s.eol)}.json`).catch(e => { log('eol', s.eol, e.message); return null; });
+    if (!(s.eol in cache)) cache[s.eol] = await getJSON(`https://endoflife.date/api/${encodeURIComponent(s.eol)}.json`).catch(e => { log('eol', s.eol, e.message); return null; });
+    const cycles = cache[s.eol];
     if (!Array.isArray(cycles)) { complete = false; failures++; continue; }
     const c = L.matchCycle(cycles, s.version), days = L.eolDays(c), p = L.eolPriority(days, a.criticality);
     if (!p) continue;
@@ -542,8 +546,8 @@ async function checkDomains(inv) {
     if (!a.domain || skips(a, 'domain')) continue;
     const d = regOf(a), base = state.domain[a.id] ||= {};
     let info;
-    try { info = d in cache ? cache[d] : (cache[d] = await rdapFor(d)); ok++; }
-    catch (e) { failed++; lastErr = e.message; continue; }
+    try { info = d in cache ? cache[d] : (cache[d] = await rdapFor(d)); ok++; cover('rdap', a.id, true, null, a.id, a.name || a.id); }
+    catch (e) { failed++; lastErr = e.message; cover('rdap', a.id, false, e.message, a.id, a.name || a.id); continue; }
 
     const expires = info?.expires || a.domainExpires || null;
     if (!expires) raise(`domain:nordap:${a.id}`, 'P3', T.noRdap(a, d), T.noRdapBody(d), a.id);
@@ -567,7 +571,6 @@ async function checkDomains(inv) {
     }
   }
   if (failed && !ok) throw new Error(lastErr);
-  state.feeds.domainPartialErr = failed ? lastErr : null;
 }
 
 // ---------- DNS against a baseline (every 5 min) ----------
@@ -592,12 +595,13 @@ async function checkDNS(inv) {
   await L.pool(inv, 10, async a => {
     if (!a.domain || skips(a, 'dns')) return;
     const d = regOf(a), base = state.dns[a.id] ||= {}, pend = base._pending ||= {};
+    let assetFailed = null;
     // NS and MX of the registrable domain always; A/AAAA of the host only when asked (CDNs rotate IPs)
     for (const t of [...new Set(['NS', 'MX', ...(a.dnsWatch || []).map(x => String(x).toUpperCase())])]) {
       if (!['NS', 'MX', 'A', 'AAAA'].includes(t)) continue;
       const name = t === 'NS' || t === 'MX' ? d : a.domain;
       let cur;
-      try { cur = await lookup(t, name); ok++; } catch (e) { failed++; lastErr = `${name} ${t}: ${e.code || e.message}`; continue; }
+      try { cur = await lookup(t, name); ok++; } catch (e) { failed++; lastErr = assetFailed = `${name} ${t}: ${e.code || e.message}`; continue; }
       if (t === 'NS') {
         if (cur === null) { pend.nx = (pend.nx || 0) + 1; if (pend.nx >= 2) raise(`dns:nx:${a.id}`, 'P1', T.dnsNx(a, d), T.dnsNxBody(a), a.id); continue; }
         pend.nx = 0;
@@ -608,13 +612,14 @@ async function checkDNS(inv) {
     }
 
     // SPF and DMARC: audit what is missing (P3) and alert when protection against spoofing gets weaker (P2)
-    if (skips(a, 'mail')) return;
+    if (skips(a, 'mail')) return cover('dns', a.id, !assetFailed, assetFailed, a.id, a.name || a.id);
     let spf, dmarc;
     try {
       spf = L.normRecords(L.spfRecords(await lookupTxt(d)));
       dmarc = L.normRecords(L.dmarcRecords(await lookupTxt(`_dmarc.${d}`)));
       ok++;
-    } catch (e) { failed++; lastErr = `${d} TXT: ${e.code || e.message}`; return; }
+    } catch (e) { failed++; lastErr = `${d} TXT: ${e.code || e.message}`; return cover('dns', a.id, false, lastErr, a.id, a.name || a.id); }
+    cover('dns', a.id, !assetFailed, assetFailed, a.id, a.name || a.id);
     const issues = [...L.spfIssues(spf), ...L.dmarcIssues(dmarc)];
     if (issues.length) raise(`mail:audit:${a.id}`, 'P3', T.mailAudit(a, d), T.mailAuditBody(a, issues.map(T.mailIssue)), a.id);
     else resolve(`mail:audit:${a.id}`, '', { quiet: true });
@@ -649,9 +654,10 @@ async function checkContent(inv) {
     let r, html;
     try {
       r = await fetch(url, { redirect: 'follow', headers: UA, signal: AbortSignal.timeout(20_000) });
-      if (!r.ok) { await r.body?.cancel(); return; }
-      html = (await r.text()).slice(0, 3_000_000);
-    } catch { return; }
+      if (!r.ok) { await r.body?.cancel(); return cover('content', a.id, false, `HTTP ${r.status}`, a.id, a.name || a.id); }
+      html = await readCapped(r);
+    } catch (e) { return cover('content', a.id, false, e.cause?.code || e.message, a.id, a.name || a.id); }
+    cover('content', a.id, true, null, a.id, a.name || a.id);
     const site = a.domain || new URL(url).hostname, base = state.web[a.id] ||= {};
     const allowed = [...(a.allowedHosts || []), ...(base.allowed || [])];
 
@@ -712,16 +718,20 @@ function readBody(req, max = 64 * 1024) {
 // body (optional JSON): { bytes, objects, durationS, restoreTest: true | "YYYY-MM-DD", message }
 // Shared by backup check-ins and inventory pushes: same secret, same signature scheme
 // Accepts the per-asset key (`node server.mjs key <asset>`) and, unless CHECKIN_ALLOW_MASTER=false, the master secret
-async function readSigned(req, u, max, assetId) {
-  const body = await readBody(req, max), sig = req.headers['x-vigia-signature'];
-  const keys = CHECKIN_SECRET ? [L.deriveKey(CHECKIN_SECRET, assetId), ...(CHECKIN_ALLOW_MASTER === 'false' ? [] : [CHECKIN_SECRET])] : [];
-  const ok = keys.some(secret => L.verifyCheckin({ secret, ts: req.headers['x-vigia-timestamp'], path: u.pathname + u.search, body, sig }));
-  return { ok, body, sig };
+async function readSigned(req, u, max, assetId, scope) {
+  const body = await readBody(req, max), sig = req.headers['x-vigia-signature'], ts = req.headers['x-vigia-timestamp'];
+  const keys = CHECKIN_SECRET ? [L.deriveKey(CHECKIN_SECRET, assetId), ...(CHECKIN_ALLOW_MASTER === 'true' ? [CHECKIN_SECRET] : [])] : [];
+  if (!keys.some(secret => L.verifyCheckin({ secret, ts, path: u.pathname + u.search, body, sig }))) return { ok: false, body, sig };
+  const next = L.replayCheck(state.replay[scope], ts, sig);
+  if (!next) return { ok: false, replay: true, body, sig };
+  state.replay[scope] = next;
+  return { ok: true, body, sig };
 }
 
 async function backupCheckin(req, u) {
   const [, , , assetId, jobId] = u.pathname.split('/').map(decodeURIComponent);
-  const { ok, body, sig } = await readSigned(req, u, undefined, assetId);
+  const { ok, replay, body } = await readSigned(req, u, undefined, assetId, `backup:${assetId}/${jobId}`);
+  if (replay) return [409, { error: 'replayed or out-of-order check-in' }];
   if (!ok) return [401, { error: 'bad or expired signature' }];
   const job = jobsOf(inventory({ includePaused: true })).find(x => x.a.id === assetId && x.j.id === jobId);
   if (!job) return [404, { error: `unknown backup job ${assetId}/${jobId}` }];
@@ -730,8 +740,7 @@ async function backupCheckin(req, u) {
   let data = {};
   try { data = body ? JSON.parse(body) : {}; } catch { return [400, { error: 'body must be JSON' }]; }
   const rec = state.backups[job.key] ||= { since: Date.now() }, now = Date.now();
-  if (rec.lastSig === sig) return [409, { error: 'replayed check-in' }];
-  rec.lastSig = sig;
+  delete rec.lastSig;
   if (status === 'start') rec.lastStart = now;
   if (status === 'fail') Object.assign(rec, { lastFail: now, lastMessage: String(data.message || '').slice(0, 300) });
   if (status === 'success') {
@@ -749,30 +758,34 @@ async function backupCheckin(req, u) {
 // Replaces the asset's pushed stack. The declared stack in inventory.json is kept and merged.
 async function inventoryPush(req, u) {
   const assetId = decodeURIComponent(u.pathname.split('/')[3] || '');
-  const { ok, body, sig } = await readSigned(req, u, 16 * 1024 * 1024, assetId);
+  const { ok, replay, body } = await readSigned(req, u, 16 * 1024 * 1024, assetId, `inv:${assetId}`);
+  if (replay) return [409, { error: 'replayed or out-of-order push' }];
   if (!ok) return [401, { error: 'bad or expired signature' }];
   const asset = inventory({ includePaused: true }).find(a => a.id === assetId);
   if (!asset) return [404, { error: `unknown asset ${assetId}` }];
   let data;
   try { data = JSON.parse(body); } catch { return [400, { error: 'body must be JSON' }]; }
   const prev = pushed[assetId];
-  if (prev?.lastSig === sig) return [409, { error: 'replayed push' }];
-  const { stack, errors } = L.parsePush(data);
+  const { stack, errors, total, truncated } = L.parsePush(data);
   if (!stack.length) return [400, { error: 'no components recognised', errors }];
   const first = !prev?.at;
-  pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, lastSig: sig, errors };
+  pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, errors, total };
   savePushed();
+  // never cut silently: the components past the limit are not being checked
+  if (truncated) raise(`inv:truncated:${assetId}`, 'P2', T.invTruncated(asset, total, L.MAX_PUSH), T.invTruncatedBody(asset), assetId);
+  else resolve(`inv:truncated:${assetId}`, '', { quiet: true });
   // A first push can bring hundreds of packages: treat it as onboarding, so it is summarised instead of paging per finding
   if (first) for (const k of ['osv', 'eol', 'wp']) delete state.scanned[`${k}:${assetId}`];
   setTimeout(() => ['osv', 'wordpress', 'eol', 'inventory'].forEach(n => runners[n]?.()), 500);
   const count = t => stack.filter(t).length;
-  return [200, { ok: true, asset: assetId, components: stack.length,
+  return [200, { ok: true, asset: assetId, components: stack.length, total, truncated,
     wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), errors }];
 }
 
 // ---------- Monthly report per client ----------
 const clientsOf = inv => [...new Set(inv.map(a => a.client).filter(Boolean))].sort();
-const slug = x => String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'client';
+// "A&B" and "A B" would share a slug: a short hash keeps every client's file apart
+const slug = x => `${String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'client'}-${shortHash(x).slice(0, 6)}`;
 
 function reportData(client, month) {
   monthRange(month); // validates
@@ -796,7 +809,7 @@ const REPORTS = path.join(DATA, 'reports');
 function writeReports(month) {
   fs.mkdirSync(REPORTS, { recursive: true });
   const clients = clientsOf(inventory({ includePaused: true }));
-  for (const c of clients) fs.writeFileSync(path.join(REPORTS, `${slug(c)}-${month}.html`), renderReport(reportData(c, month), VIGIA_LANG));
+  for (const c of clients) writeAtomic(path.join(REPORTS, `${slug(c)}-${month}.html`), renderReport(reportData(c, month), VIGIA_LANG));
   return clients.length;
 }
 
@@ -812,16 +825,16 @@ if (process.argv[2] === 'report') {
 // ---------- Scheduler ----------
 const runners = {}; // name -> run(), so a push can trigger checks right away
 const every = (name, ms, fn) => {
-  let busy = false;
+  let busy = false, again = false;
   const run = async () => {
-    if (busy) return;
+    if (busy) { again = true; return; } // e.g. a push during a scan: scan again with the new inventory, do not drop it
     busy = true;
-    const queue = [];
-    try { await burst.run(queue, () => fn(inventory())); state.feeds[name] = Date.now(); state.feeds[name + 'Err'] = null; }
-    catch (e) { log(name, 'error:', e.message); state.feeds[name + 'Err'] = e.message; }
-    flush(name, queue);
-    busy = false;
-    save();
+    try {
+      await alerts.run(name, () => fn(inventory()));
+      state.feeds[name] = Date.now(); state.feeds[name + 'Err'] = null;
+    } catch (e) { log(name, 'error:', e.message); state.feeds[name + 'Err'] = e.message; }
+    finally { busy = false; save(); }
+    if (again) { again = false; setImmediate(run); }
   };
   runners[name] = run;
   run(); setInterval(run, ms);
@@ -861,8 +874,9 @@ every('health', 60_000, async () => {
   }
   const now = Date.now();
 
-  // Unacknowledged P1s ring again every 10 minutes, whatever check raised them
-  for (const a of Object.values(state.alerts)) if (a.prio === 'P1' && !a.ack && now - a.sentAt > REPEAT_P1_MS) { a.sentAt = now; send('P1', T.repeat(a.title), a.body, a.key); }
+  // P1s ring again every 10 minutes, P2s that never reached a channel are retried, forgotten onboarding findings are announced
+  alerts.sweep(now);
+  if (saveErr) raise('vigia:disk', 'P1', T.diskError, T.diskErrorBody(saveErr), null); else resolve('vigia:disk', '');
 
   // Inventory problems are alerts, and while there are any nothing is deleted as an orphan
   inventory();
@@ -871,7 +885,13 @@ every('health', 60_000, async () => {
   if (!inv$.broken && !inv$.errors.length) {
     const ids = new Set(inventory({ includePaused: true }).map(a => a.id));
     for (const a of Object.values(state.alerts)) if (a.asset && !ids.has(a.asset)) delete state.alerts[a.key];
-    for (const m of [state.status, state.web, state.dns, state.domain, state.kev.checked || {}]) for (const id of Object.keys(m)) if (!ids.has(id)) delete m[id];
+    for (const m of [state.status, state.web, state.dns, state.domain, state.avail, state.kev.checked || {}]) for (const id of Object.keys(m)) if (!ids.has(id)) delete m[id];
+    // per-device and per-asset records: devices removed from an asset go too
+    const devs = new Set(inventory({ includePaused: true }).flatMap(a => a.stack.filter(x => x.edge).map(x => `${a.id}:${x.edgeIndex}`)));
+    for (const m of [state.adv, state.edgeSeen]) for (const d of Object.keys(m)) if (!devs.has(d)) delete m[d];
+    for (const al of Object.values(state.alerts)) if (al.dev && !devs.has(al.dev)) delete state.alerts[al.key];
+    for (const k of Object.keys(state.coverage)) { const id = k.slice(k.indexOf(':') + 1); if (!k.startsWith('feed:') && !ids.has(id)) delete state.coverage[k]; }
+    for (const k of Object.keys(state.replay)) { const id = k.slice(k.indexOf(':') + 1).split('/')[0]; if (!ids.has(id)) delete state.replay[k]; }
     for (const k of Object.keys(state.scanned)) if (!ids.has(k.slice(k.indexOf(':') + 1))) delete state.scanned[k];
     let gone = false;
     for (const id of Object.keys(pushed)) if (!ids.has(id)) { delete pushed[id]; gone = true; }
@@ -885,11 +905,14 @@ every('health', 60_000, async () => {
   // New month: write every client's report for the month that just ended (not on a fresh install: there is no data)
   const thisMonth = monthOf(now);
   if (state.feeds.reportMonth !== thisMonth) {
-    const fresh = !state.feeds.reportMonth;
-    state.feeds.reportMonth = thisMonth;
-    if (!fresh) {
-      const last = previousMonth(thisMonth), n = writeReports(last);
-      if (n) send('P2', T.reportsReady(n, last), T.reportsReadyBody(PUBLIC_URL && `${PUBLIC_URL.replace(/\/$/, '')}/#reports`));
+    if (!state.feeds.reportMonth) state.feeds.reportMonth = thisMonth;
+    else {
+      // marked done only once every file is written: a full disk is retried next minute, not skipped for a month
+      try {
+        const last = previousMonth(thisMonth), n = writeReports(last);
+        state.feeds.reportMonth = thisMonth; state.feeds.reportErr = null;
+        if (n) send('P2', T.reportsReady(n, last), T.reportsReadyBody(PUBLIC_URL && `${PUBLIC_URL.replace(/\/$/, '')}/#/informes`));
+      } catch (e) { if (state.feeds.reportErr !== e.message) log('monthly reports:', e.message); state.feeds.reportErr = e.message; }
     }
   }
   // Broken chain: retry every 10 min with a message that also tells you alerts may have been lost
@@ -918,14 +941,14 @@ every('health', 60_000, async () => {
 every('digest', 5 * 60_000, async () => {
   const { day, hour } = L.localClock(DIGEST_TZ);
   if (hour < +DIGEST_HOUR || state.feeds.digestDay === day) return;
-  const firstRun = !state.feeds.digestDay;
-  state.feeds.digestDay = day;
-  if (firstRun) return; // a fresh install does not open with a digest
-  const since = Date.now() - 864e5, all = Object.values(state.alerts).filter(a => !a.key.startsWith('canary:'));
-  const p3 = all.filter(a => a.prio === 'P3' && a.first > since), p2 = all.filter(a => a.prio === 'P2' && !a.ack);
-  if (!p3.length && !p2.length) return;
+  // a fresh install does not open with a digest, but what it finds from its first minute is in the next one
+  if (!state.feeds.digestDay) { state.feeds.digestDay = day; state.feeds.digestFrom ??= START; return; }
+  const now = Date.now(), since = state.feeds.digestFrom ?? now - 864e5;
+  const { p2, p3 } = L.digestPick(Object.values(state.alerts), since);
+  if (!p3.length && !p2.length) { Object.assign(state.feeds, { digestDay: day, digestFrom: now }); return; }
   const top = [...p2, ...p3].slice(0, 8).map(a => `• ${a.prio} ${a.title}`).join('\n');
-  notify('P2', T.digest(p2.length, p3.length), top + (p2.length + p3.length > 8 ? `\n${T.more}` : ''));
+  const r = await notify('P2', T.digest(p2.length, p3.length), top + (p2.length + p3.length > 8 ? `\n${T.more}` : ''));
+  if (r.sent) Object.assign(state.feeds, { digestDay: day, digestFrom: now }); // otherwise retried at the next tick
 });
 
 // ---------- Dashboard + API ----------
@@ -938,18 +961,39 @@ const STATIC_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascr
   '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const STATIC = new Set(fs.existsSync(PUBLIC) ? fs.readdirSync(PUBLIC).filter(f => STATIC_TYPES[path.extname(f)]) : []);
 const SECURITY_HEADERS = { 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
-  'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" };
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'" };
+// data responses must never be stored by a browser or proxy
+const NO_STORE = { 'cache-control': 'no-store' };
+
+// Repeated wrong passwords from one address: 10 failures in 10 minutes block it for 10 minutes
+const authFails = new Map();
+const authBlocked = ip => { const f = authFails.get(ip); return f && f.n >= 10 && Date.now() - f.at < 600_000; };
+function authFailed(ip) {
+  const f = authFails.get(ip);
+  authFails.set(ip, f && Date.now() - f.at < 600_000 ? { n: f.n + 1, at: f.at } : { n: 1, at: Date.now() });
+  if (authFails.size > 10_000) authFails.clear();
+}
+
+// Listening beyond this machine without a password exposes every client's inventory: refuse unless explicitly allowed
+const LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
+if (!LOCAL && !DASH_PASS && ALLOW_NO_PASSWORD !== 'true') {
+  console.error(`Refusing to listen on ${HOST} without DASH_PASS. Set DASH_PASS (recommended), or ALLOW_NO_PASSWORD=true if a proxy in front already authenticates.`);
+  process.exit(1);
+}
 const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
-  const json = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json', ...SECURITY_HEADERS }); res.end(JSON.stringify(o)); };
-  const html = (s, c = 200) => { res.writeHead(c, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS }); res.end(s); };
+  const json = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json', ...SECURITY_HEADERS, ...NO_STORE }); res.end(JSON.stringify(o)); };
+  const html = (s, c = 200) => { res.writeHead(c, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS, ...NO_STORE }); res.end(s); };
+  const ip = req.socket.remoteAddress || '';
+  const denyAuth = () => { authFailed(ip); res.writeHead(401, { 'www-authenticate': 'Basic realm="Vigia"', ...NO_STORE }); return res.end('unauthorized'); };
+  if (authHeader && authBlocked(ip)) { res.writeHead(429, { 'retry-after': '600', ...NO_STORE }); return res.end('too many failed logins'); }
 
   // the installable app shell (no client data in it)
   const file = u.pathname === '/' ? 'index.html' : u.pathname.slice(1);
   if (req.method === 'GET' && STATIC.has(file)) {
-    if (file === 'index.html' && authHeader && !authOk(req.headers.authorization)) { res.writeHead(401, { 'www-authenticate': 'Basic realm="Vigia"' }); return res.end('unauthorized'); }
+    if (file === 'index.html' && authHeader && !authOk(req.headers.authorization)) return denyAuth();
     res.writeHead(200, { 'content-type': STATIC_TYPES[path.extname(file)], 'cache-control': 'no-cache', ...SECURITY_HEADERS,
       ...(file === 'sw.js' && { 'service-worker-allowed': '/' }) });
     return res.end(fs.readFileSync(path.join(PUBLIC, file)));
@@ -958,14 +1002,19 @@ http.createServer(async (req, res) => {
   // unauthenticated, so it says nothing about clients (feed errors contain their domains)
   if (u.pathname === '/healthz') return json({ ok: true, uptimeAt: state.feeds.uptime || null });
 
-  // Signed acknowledge link from a notification: GET shows a confirm button (link previews cannot ack), POST acks
-  const key = u.searchParams.get('key'), signed = L.verifyAck(key, u.searchParams.get('sig'), ACK_SECRET);
-  if (u.pathname === '/api/ack' && signed) {
+  // Signed acknowledge link from a notification: bound to one alert instance and an expiry.
+  // GET shows a confirm button (link previews cannot acknowledge), POST acknowledges.
+  const key = u.searchParams.get('key'), f = u.searchParams.get('f'), e = u.searchParams.get('e');
+  const signed = !!key && /^\d+$/.test(f || '') && /^\d+$/.test(e || '') && +e > Date.now()
+    && L.verifyAck(L.ackPayload(key, f, e), u.searchParams.get('sig'), ACK_SECRET) && String(alerts.firstOf(key)) === f;
+  if (u.pathname === '/api/ack' && u.searchParams.has('sig')) {
+    if (!signed) return html(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:16px system-ui;padding:24px"><p>${escHtml(T.ackLinkInvalid)}</p>`, 410);
     if (req.method === 'POST') { ackAlert(key); return req.headers.accept?.includes('text/html') ? html(`<p>${escHtml(T.acked)}</p>`) : json({ ok: true }); }
-    const a = state.alerts[key];
+    const a = state.alerts[key], g = String(key).startsWith('group:') ? state.groups[key.slice(6)] : null;
+    const items = g ? g.keys.map(k => state.alerts[k]).filter(Boolean) : a ? [a] : [];
     return html(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:16px system-ui;padding:24px">
-      <p><b>${escHtml(a ? `${a.prio} ${a.title}` : key)}</b></p><p>${escHtml(a?.body || '')}</p>
-      <form method="post"><button style="font-size:18px;padding:12px 20px">${escHtml(T.ack)}</button></form>`);
+      ${items.slice(0, 20).map(x => `<p><b>${escHtml(`${x.prio} ${x.title}`)}</b><br>${escHtml(g ? '' : x.body)}</p>`).join('')}
+      <form method="post"><button style="font-size:18px;padding:12px 20px">${escHtml(g ? T.ackAll(items.length) : T.ack)}</button></form>`);
   }
 
   if (u.pathname.startsWith('/api/inventory/') && req.method === 'POST') {
@@ -977,7 +1026,7 @@ http.createServer(async (req, res) => {
     catch (e) { return json({ error: e.message }, 400); }
   }
 
-  if (authHeader && !authOk(req.headers.authorization)) { res.writeHead(401, { 'www-authenticate': 'Basic realm="Vigia"' }); return res.end('unauthorized'); }
+  if (authHeader && !authOk(req.headers.authorization)) return denyAuth();
   if (!authHeader && !dashHosts.has(String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase()))
     return json({ error: 'host not allowed: add it to DASH_HOSTS, or set DASH_PASS' }, 421);
   // Dashboard actions need a header a cross-site form or image cannot send (CSRF on "Accept change")
@@ -988,15 +1037,19 @@ http.createServer(async (req, res) => {
     inventory: inventory({ includePaused: true }).map(a => ({ ...a, stack: a.stack.filter(x => !x.edge).slice(0, 6), stackCount: a.stack.length,
       edge: a.stack.filter(x => x.edge).map(({ name, type, product, version, portal, management, edgeIndex }) => ({ name, type, product, version, portal, management, edgeIndex })),
       avail: state.avail[a.id]?.[monthOf()] || null })),
-    config: { checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER !== 'false', wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
+    config: { checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
       canaryDays: +CANARY_DAYS, epss: [+EPSS_P1, +EPSS_P2], digestHour: +DIGEST_HOUR, timeZone: DIGEST_TZ, brand: REPORT_BRAND, inventoryError: inv$.broken },
     status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
-    pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: Object.fromEntries(Object.entries(state.backups).map(([k, v]) => [k, { ...v, lastSig: undefined }])),
+    pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: state.backups,
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }
-  if (u.pathname === '/api/test' && req.method === 'POST') { await notify('P1', T.testTitle, T.testBody, 'test'); return json({ ok: true }); }
+  if (u.pathname === '/api/test' && req.method === 'POST') {
+    const r = await notify('P1', T.testTitle, T.testBody, 'test');
+    if (!r.total) return json({ ok: false, error: 'no alert channel configured' }, 400);
+    return r.sent ? json({ ok: true, sent: r.sent, failed: r.failed }) : json({ ok: false, error: `no channel delivered it: ${(r.errors || []).join('; ')}` }, 502);
+  }
   if (u.pathname === '/api/reports') return json({ clients: clientsOf(inventory({ includePaused: true })), months: [monthOf(), previousMonth(monthOf())] });
   if (u.pathname === '/report') {
     const client = u.searchParams.get('client'), month = u.searchParams.get('month') || monthOf();
@@ -1008,5 +1061,5 @@ http.createServer(async (req, res) => {
 }).listen(PORT, HOST, () => {
   const ch = [NTFY_TOPIC && 'ntfy', TELEGRAM_BOT_TOKEN && 'telegram', WEBHOOK_URL && 'webhook'].filter(Boolean).join('+') || 'NONE (console only)';
   log(`Vigía on http://${HOST}:${PORT} — alerts: ${ch} — heartbeat: ${HEARTBEAT_URL ? 'yes' : 'NO'} — phone ack: ${PUBLIC_URL && ACK_SECRET ? 'yes' : 'no'}`);
-  if (!['127.0.0.1', 'localhost', '::1'].includes(HOST) && !DASH_PASS) log('WARNING: dashboard exposed without DASH_PASS');
+  if (!LOCAL && !DASH_PASS) log('WARNING: listening without DASH_PASS (ALLOW_NO_PASSWORD=true)');
 });

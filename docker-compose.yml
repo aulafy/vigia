@@ -3,6 +3,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # The container listens on all its interfaces, so Vigía requires DASH_PASS in .env (it refuses to start without it)
     environment:
       HOST: 0.0.0.0
     ports:

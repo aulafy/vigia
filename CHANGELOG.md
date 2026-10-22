@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.9.0 — 2026-10-23
+
+Driven by two external reviews: a code review by Codex (bugs, scale, security, UX) and research by Grok (how edge zero-days actually surface).
+
+### ⚠️ Breaking
+- **The master `CHECKIN_SECRET` is no longer accepted** for backup check-ins and inventory pushes. Each server must use its asset's key (`node server.mjs key <asset-id>`). To migrate gradually, set `CHECKIN_ALLOW_MASTER=true` temporarily.
+- **Vigía refuses to listen beyond localhost without `DASH_PASS`**, and that includes Docker, where it listens on `0.0.0.0` inside the container. Set `DASH_PASS` in `.env`, or `ALLOW_NO_PASSWORD=true` if a proxy in front already authenticates.
+- **Acknowledge links** in notifications are now bound to the alert instance and expire (`ACK_LINK_DAYS`, 7 by default). Links sent by older versions stop working.
+
+### Fixed: alerts that could go unnoticed
+- **A worse priority now re-pages** (for example TLS from P2 to P1, a domain under 7 days, or a vulnerability that turns out to be in KEV) and resets the acknowledgement. Before, the first priority stayed frozen.
+- **Delivery is tracked per alert.** A P2 that never reached a channel, because of a crash, a restart or an outage, is retried every 10 minutes until one confirms it.
+- **Bursts can be acknowledged from the phone:** the summary carries a group link that acknowledges every alert in it.
+- **Onboarding findings** of a scan that failed half-way are no longer silenced: they join the next summary, and the health loop announces any left behind after an hour.
+- **Daily digest:** uses a cursor instead of "last 24 h", so P3s from before the first digest or from an outage are no longer lost. It retries if sending failed.
+- **The test alert** reports an error when no channel delivered it.
+- **OSV:** follows `next_page_token` instead of silently truncating at 1,000 vulnerabilities per package.
+- **A push during a busy scan** triggers another scan when it ends, instead of being dropped.
+- **Coverage alerts:** RDAP, DNS, page content or an advisory feed failing 3 times in a row for one asset or feed raises a P2 ("cannot check…"). Before, one success anywhere marked the whole run healthy.
+- **Monthly reports** are written atomically. The month is marked done only after every file is written, file names no longer collide (`A&B` and `A B`), and months follow `DIGEST_TZ` (DST included) instead of UTC.
+- **Page bodies** are read up to 3 MB and the rest is dropped, so a huge page can no longer exhaust memory.
+- **State files** are written with fsync. A disk error raises a P1 instead of crashing.
+- KEV alerts close when their component disappears. Per-device and per-asset records of removed assets are cleaned up. A failed end-of-life lookup is no longer repeated for every component. An inventory push over 20,000 components says so and raises a P2.
+- **TLS** is checked on the URL's own port. The dashboard shows a site as down only once the failure threshold is reached, matching the alerts.
+- "Not known to be exploited in the wild" and its Spanish equivalents are no longer read as exploitation.
+- XML entities outside Unicode no longer break a feed.
+
+### Added: earlier warning on edge devices
+- **Research feeds** for every declared firewall/VPN: Volexity, watchTowr Labs, GreyNoise and Rapid7. Posts older than `ADVISORY_MAX_AGE_DAYS` (45) are ignored.
+- **Reconnaissance alerts (P2)**: GreyNoise-style "scanning spike against SonicWall…" posts. Attackers looking for your device type is the earliest signal there is.
+- **Exposed and exploited is one P1**: when a device's management interface answers from the Internet *and* it has an exploited vulnerability, the exposure alert becomes P1 "EXPLOITABLE FROM THE INTERNET".
+- **"Patch and check for compromise"**: exploitation often starts weeks before the advisory (BeyondTrust: about 47 days), so exploited edge alerts include compromise-assessment guidance.
+- **Firmware version freshness:** a declared version not confirmed for `EDGE_VERSION_DAYS` (60) raises a P3. Add `"checked": "YYYY-MM-DD"` to a device after verifying it.
+- Severity understands research wording: "0-day exploitation" is P1 and "pre-auth RCE" is P2.
+
+### Security
+- Signed check-ins and pushes must move forward in time per asset and endpoint: an A, B, A replay inside the 5-minute window is rejected.
+- 10 failed logins from one address in 10 minutes → blocked for 10 minutes (429).
+- `Cache-Control: no-store` on data, reports and acknowledge pages. The CSP no longer allows inline scripts.
+
+### Dashboard
+- Redraws only when something changed, and keeps keyboard focus across refreshes. Expandable texts are keyboard-accessible (`aria-expanded`, Enter/Space).
+- P1/P2/P3 tags meet 4.5:1 contrast in both themes. There is a skip link, the search box has an accessible label, and touch targets on phones are at least 44 px.
+- Refreshes cannot overlap, and a slow answer never overwrites a newer one. Errors are told apart: expired session, server error and offline (with or without data already shown).
+
+### Internal
+- The alert lifecycle moved to `alerts.mjs` with the transport injected. It is covered by `test/alerts.test.mjs`, and `test/server.test.mjs` starts the real server for HTTP integration tests. 81 tests in total.
+
 ## 0.8.0 — 2026-10-23
 
 ### Added
