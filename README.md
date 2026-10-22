@@ -1,6 +1,6 @@
 # Vigía
 
-**24/7 watch over every website you are responsible for. It wakes you up only when something actually affects one of your assets.**
+**24/7 watch over your clients' websites, firewalls, domains and backups. It wakes you up only when something actually affects one of them.**
 
 [![CI](https://github.com/aulafy/vigia/actions/workflows/ci.yml/badge.svg)](https://github.com/aulafy/vigia/actions/workflows/ci.yml)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933)
@@ -17,7 +17,8 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
  CISA KEV (exploited CVEs) ─┐       client / site / criticality
  OSV (npm, PyPI, Packagist…)┤       product + exact version         P1 → push that rings, repeated
  Wordfence (WordPress) ─────┼──▶    (declared, or pushed daily ──▶       every 10 min until you ack
- endoflife.date ────────────┘        by each server)
+ endoflife.date ────────────┤        by each server)
+ Vendor + research advisories ┘
  HTTP + TLS probes every 60 s ─────────────────────────────▶       P2 → push
  RDAP + DNS + page content ── compared with a baseline ────▶       P3 → daily digest
 ```
@@ -40,7 +41,7 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
 | on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
-| 60 s | **Self-health:** stale feeds, plus an outgoing heartbeat to an external service | P2, or the external service pages you |
+| 60 s | **Self-health:** stale feeds, checks that keep failing for one asset or feed (coverage), alert channels, disk, and an outgoing heartbeat to an external service | P2 (disk: P1), or the external service pages you |
 | daily | **Digest** of open P2s and new P3s | one message |
 
 ## Why it stays quiet
@@ -52,7 +53,7 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **Onboarding sends a summary.** When you add a site that runs old software, its first scan sends one message ("20 findings · P1: 0 · P2: 9 · P3: 11") instead of 20 separate alerts. P1s still ring.
 - **Alerts deduplicate and close themselves.** A finding is reported once. Once you upgrade the dependency, the next scan closes the alert.
 - **Change alerts learn.** The first time Vigía sees a site's nameservers, registrar or third-party scripts, it saves them as the baseline. When something differs, you get an alert with an **Accept change** button. If the change was yours, one tap makes it the new baseline. A DNS change has to show up twice in a row before it alerts, so a flaky resolver does not page you.
-- **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone.
+- **Only P1s repeat.** They come back every 10 minutes until you acknowledge them, from the dashboard or straight from the notification on your phone. P2s are sent once, and resent only if no channel confirmed delivery.
 - **The front door first.** The firewall or VPN gateway is where most small-business breaches start, so for declared edge devices a KEV match is always P1 and vendor advisories arrive before KEV catches up. See [docs/edge.md](docs/edge.md).
 - **Nothing is lost on the way.** Every P1/P2 keeps its delivery status until a channel confirms it, and undelivered ones are retried. An alert that gets worse pages again. A check that keeps failing for one asset or feed becomes a P2 ("cannot check…"), because a blind spot is a problem too.
 - **Bursts are grouped.** When one check produces more than 3 messages at once, for example 30 sites on the same server going down, you get one summary instead of 30 pages. If Vigía's own connection drops, it notices and skips the uptime round instead of reporting every site as down.
@@ -60,6 +61,8 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 - **So is the alert chain.** Each channel is retried and checked for real delivery. If one fails, the others tell you. If all fail, Vigía sends `/fail` to the heartbeat service, which reaches you by email or SMS. Once a week a **canary** alert asks you to acknowledge it. If nobody does, Vigía treats the chain as broken, because "the push was sent" does not prove that anyone saw it.
 
 ## Quick start
+
+> In a hurry? The **[technician's quick manual](docs/manual.md)** covers setup, daily use and troubleshooting on one page.
 
 Requires Node.js 20 or newer. There is nothing to install.
 
@@ -73,7 +76,7 @@ npm run demo                      # or: try it first with demo clients (nothing 
 
 1. Install the **[ntfy](https://ntfy.sh)** app (iOS/Android) and subscribe to the topic you put in `NTFY_TOPIC`. Pick a long random name: anyone who knows a topic on the public ntfy.sh server can read it.
 2. Open the dashboard and press **Send test alert**. Your phone should ring.
-3. On the first run Vigía copies `inventory.example.json` to `data/inventory.json`. Edit that file to describe your clients (see below). Vigía re-reads it on every cycle, so there is no need to restart.
+3. On the first run Vigía copies `inventory.example.json` to `data/inventory.json`. Edit that file to describe your clients (see below). Vigía picks up every change without a restart.
 4. Create a free check on [healthchecks.io](https://healthchecks.io) and put its ping URL in `HEARTBEAT_URL`.
 5. Deploy it somewhere that is always on and **is not one of the servers it watches**. See [docs/deployment.md](docs/deployment.md).
 
@@ -159,10 +162,10 @@ All settings are environment variables, which can live in `.env`:
 | `HEARTBEAT_URL` | — | Pinged every minute (dead man's switch). Receives `/fail` when the alert chain is broken. |
 | `HEARTBEAT_FAIL_URL` | `HEARTBEAT_URL` + `/fail` | Failure URL, for services that use a different one |
 | `CANARY_DAYS`, `CANARY_ACK_HOURS` | `7`, `24` | Weekly test alert that must be acknowledged. `0` turns it off. |
-| `CHECKIN_SECRET` | — | Secret for signed backup check-ins and inventory pushes |
+| `CHECKIN_SECRET` | — | Master secret for backup check-ins and inventory pushes. Servers never get it: they get per-asset keys (`node server.mjs key <asset>`) |
 | `WORDFENCE_API_KEY` | — | Free Wordfence Intelligence key, enables WordPress checks |
 | `WORDFENCE_HOURS`, `WORDFENCE_URL` | `6`, the v3 production feed | How often to refresh the feed, and from where (a mirror, for example) |
-| `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed acknowledge links in P1 notifications |
+| `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed, expiring acknowledge links in P1/P2 notifications |
 | `HOST`, `PORT` | `127.0.0.1`, `4848` | Dashboard bind address |
 | `DASH_PASS` | — | HTTP Basic auth for the dashboard (user `vigia`). Required when listening beyond localhost, Docker included |
 | `DIGEST_HOUR`, `DIGEST_TZ` | `9`, `Europe/Madrid` | When to send the daily digest |
@@ -176,7 +179,7 @@ All settings are environment variables, which can live in `.env`:
 | `EDGE_VERSION_DAYS`, `ADVISORY_MAX_AGE_DAYS` | `60`, `45` | Ask to confirm a firmware version after this; ignore older advisories and posts |
 | `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8` | Resolvers for the DNS check. Public resolvers avoid stale local caches and split-horizon answers. |
-| `VIGIA_INV`, `VIGIA_STATE` | `data/inventory.json`, `data/state.json` | File locations |
+| `VIGIA_INV`, `VIGIA_STATE`, `VIGIA_PUSHED`, `VIGIA_WORDFENCE` | `data/…` | File locations |
 
 ## HTTP endpoints
 
@@ -185,11 +188,12 @@ All settings are environment variables, which can live in `.env`:
 | `GET /` | dashboard | Web dashboard (installable app; its static files are public, the data is not) |
 | `GET /api/state` | dashboard | Inventory, status, alerts and feed timestamps as JSON |
 | `POST /api/ack?key=…` | dashboard | Acknowledge an alert. For a change alert, this also accepts the new value as the baseline. |
-| `GET/POST /api/ack?key=…&sig=…` | signed link | Acknowledge from a notification. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
+| `GET/POST /api/ack?key=…&f=…&e=…&sig=…` | signed link | Acknowledge from a notification. The link is bound to one alert (or one burst summary) and expires; an invalid one answers `410`. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
 | `POST /api/backup/<asset>/<job>?status=…` | HMAC signature | Backup check-in, see [docs/backups.md](docs/backups.md#check-in-protocol) |
 | `POST /api/inventory/<asset>` | HMAC signature | Inventory push, see [docs/inventory-push.md](docs/inventory-push.md#protocol) |
+| `GET /api/reports` | dashboard | Clients and months available for reports |
 | `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
-| `POST /api/test` | dashboard | Send a test P1 to every channel |
+| `POST /api/test` | dashboard | Send a test P1 to every channel. Answers `400` with no channel configured and `502` if none delivered it |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
 ## What Vigía is not
@@ -198,6 +202,7 @@ Be honest with your clients about what is covered:
 
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
 - **PrestaShop, Joomla and Drupal modules** are not covered by a dedicated feed yet: only through OSV (Composer packages) and KEV. WordPress is covered through Wordfence.
+- **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers.
 - **It is not a SIEM, EDR or WAF.** Logs, file integrity, malware and intrusion detection belong to tools like Wazuh, CrowdSec or Cloudflare. Vigía complements them.
 - **It only knows about backups that report in.** It cannot see inside your backup tool. A job that never calls `vigia-checkin.sh` is invisible, and a "success" is only as honest as the script that sends it. Real restore tests remain your job: Vigía only reminds you.
 - **The content check reads the HTML the server sends.** Scripts injected later by JavaScript, for example through a tag manager, or code that only shows up for some visitors (cloaking), are invisible to it. It catches the common cases, but it is not a full malware scanner.
@@ -216,6 +221,8 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
 - `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 
+New to Vigía? Start with the **[technician's quick manual](docs/manual.md)**.
+
 Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
 
 ## Roadmap
@@ -225,14 +232,15 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 - Optional URL reputation through Google Web Risk
 - More vendor PSIRT feeds (SonicWall, Ivanti and Citrix publish no usable RSS today; INCIBE-CERT covers them)
 - Report delivery by email
-- Importing the inventory from SBOMs (CycloneDX/SPDX) and lockfiles
 - Built-in PagerDuty Events v2 and Twilio call integrations
-- Vendor advisory RSS feeds (INCIBE-CERT, Ubuntu USN, Debian DSA)
+- Ubuntu USN and Debian DSA advisory feeds
+- Lower memory use for the Wordfence feed, and faster uptime rounds beyond 1,000 assets
+- Importing monitors from Uptime Kuma
 - Maintenance windows and per-client quiet hours
 
 ## Data sources
 
-CISA KEV (public domain), FIRST EPSS, vendor PSIRT feeds (Fortinet, Palo Alto Networks, Cisco), INCIBE-CERT, OSV.dev (each record under its source's licence), endoflife.date (MIT), IANA RDAP bootstrap, and Wordfence Intelligence (free for personal and commercial use under Wordfence's terms, cited as the source in every WordPress alert).
+CISA KEV (public domain), FIRST EPSS, vendor PSIRT feeds (Fortinet, Palo Alto Networks, Cisco), INCIBE-CERT, research blogs (Volexity, watchTowr Labs, GreyNoise, Rapid7; titles and links only), OSV.dev (each record under its source's licence), endoflife.date (MIT), IANA RDAP bootstrap, and Wordfence Intelligence (free for personal and commercial use under Wordfence's terms, cited as the source in every WordPress alert).
 
 ## License
 

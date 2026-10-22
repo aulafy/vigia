@@ -5,7 +5,7 @@
 | Priority | Meaning | What you receive |
 |---|---|---|
 | **P1** | Act now, even at night: a critical site is down, a vulnerability exploited in the wild matches your stack, a certificate expires within days | Push at maximum priority, **repeated every 10 minutes until acknowledged** |
-| **P2** | Act within hours: a high-severity vulnerability applies, software is out of support, a feed is not updating | One push |
+| **P2** | Act within hours: a high-severity vulnerability applies, software is out of support, a feed or check is not working | One push (resent only if no channel confirmed it) |
 | **P3** | Plan it: moderate vulnerabilities, upcoming end-of-life | Only in the daily digest and the dashboard |
 
 **Change alerts** (DNS records, registrar, transfer lock, redirects, new third-party scripts) compare against a baseline. Acknowledging one also **accepts the new value as the baseline**, so the same change does not alert again. The dashboard labels that button **Accept change**. Accept only changes you recognise.
@@ -46,13 +46,13 @@ Telegram cannot bypass silent mode the way ntfy can. Use it as a second channel,
   "title": "ACME Ltd: Online shop is DOWN",
   "body": "ENOTFOUND (2 consecutive failures) — https://example.com. Contact: Jane +34 600…",
   "key": "down:acme-shop",
-  "ackUrl": "https://vigia.example.com/api/ack?key=down%3Aacme-shop&sig=…"
+  "ackUrl": "https://vigia.example.com/api/ack?key=down%3Aacme-shop&f=1792700000000&e=1793304800000&sig=…"
 }
 ```
 
 Use it to connect a real on-call platform, which calls you, escalates to a second person when you do not answer, and keeps the rota:
 
-- **PagerDuty / Better Stack / Opsgenie / Grafana OnCall:** create an incoming-webhook integration and point `WEBHOOK_URL` at it, with a small relay if the platform needs a different payload. Use `key` as the deduplication key.
+- **PagerDuty / Better Stack / Opsgenie / Grafana OnCall:** create an incoming-webhook integration and point `WEBHOOK_URL` at it, with a small relay if the platform needs a different payload. Use `key` as the deduplication key. Burst summaries carry a `group:…` key that acknowledges every alert they contain.
 - **Twilio:** a Twilio Studio flow triggered over HTTP can place a voice call that reads `title` out loud.
 - **n8n / Make / Zapier:** fan the alert out to email, tickets or chat.
 
@@ -66,9 +66,9 @@ By default you acknowledge a P1 in the dashboard. To do it straight from the not
 2. Set `PUBLIC_URL=https://vigia.example.com`.
 3. Set `ACK_SECRET` to a random value: `openssl rand -hex 32`.
 
-Each link is bound to that alert instance and expires after `ACK_LINK_DAYS` (7). An old link cannot acknowledge a new occurrence of the same problem.
+P1 and P2 notifications then include an **Acknowledge** button in ntfy and a link in Telegram and the webhook. Each link is signed with HMAC-SHA256 for that alert only. It acknowledges that alert (or every alert of one burst summary) and nothing else, and it works without the dashboard password. Opening the link with GET shows a confirmation button, so Telegram previews or link scanners cannot acknowledge an alert by accident.
 
-P1 and P2 notifications then include an **Acknowledge** button in ntfy and a link in Telegram and the webhook. Each link is signed with HMAC-SHA256 for that alert only. It acknowledges that alert and nothing else, and it works without the dashboard password. Opening the link with GET shows a confirmation button, so Telegram previews or link scanners cannot acknowledge an alert by accident.
+Each link is bound to that alert instance and expires after `ACK_LINK_DAYS` (7): an old link cannot acknowledge a new occurrence of the same problem. An expired or invalid link answers `410`; use the dashboard instead.
 
 ## Watching the watcher
 
@@ -88,9 +88,11 @@ The channels can all work and you can still miss alerts: the app was uninstalled
 ### The process
 
 - **Heartbeat:** set `HEARTBEAT_URL` to a ping URL from [healthchecks.io](https://healthchecks.io) (free tier) or a Better Stack heartbeat, and configure that service to alert you. Vigía calls it every minute. If the process crashes, the machine powers off or the network drops, the pings stop and the external service pages you.
-- **Stale feeds:** if KEV has not updated for 1 hour, OSV for 2 hours or endoflife.date for 24 hours, Vigía raises a P2 with the last error.
+- **Stale feeds:** a check that has not completed for about three cycles raises a P2 with the last error: uptime 5 min, DNS 20 min, KEV/content/edge 1 h, OSV/WordPress 2 h, EPSS 6 h, endoflife.date/RDAP 24 h. A feed that never worked since start counts from the start.
+- **Coverage:** RDAP, DNS, page content or an advisory feed failing 3 times in a row *for one asset or feed* raises a P2 "cannot check…", even when the rest of the run is fine. It closes when the check works again.
+- **Disk:** if `state.json` cannot be written, Vigía raises a P1. Alerts and acknowledgements would otherwise be lost on restart.
 - **`/healthz`:** an unauthenticated liveness endpoint for Docker, systemd watchdogs or a load balancer.
 
 ## Daily digest
 
-Every day at `DIGEST_HOUR` (time zone `DIGEST_TZ`), Vigía sends one message listing the open P2s you have not acknowledged and the P3s created in the last 24 hours. If there is nothing, it sends nothing. A fresh install skips its first day, so it does not open with a digest.
+Every day at `DIGEST_HOUR` (time zone `DIGEST_TZ`), Vigía sends one message listing the open P2s you have not acknowledged and the P3s created since the last digest that went out. If there is nothing, it sends nothing; if sending fails, it tries again a few minutes later. A fresh install skips its first day, so it does not open with a digest, but what it finds from its first minute is in the next one.

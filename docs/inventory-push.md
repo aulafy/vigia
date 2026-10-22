@@ -73,7 +73,7 @@ x-vigia-timestamp / x-vigia-signature: same scheme as backup check-ins (docs/bac
 ]}
 ```
 
-The body may be up to 16 MB, with up to 20,000 components per asset. Responses: `200`, `400` (invalid JSON or nothing recognised), `401` (signature), `404` (unknown asset), `409` (replay).
+The body may be up to 16 MB, with up to 20,000 components per asset. Responses: `200`, `400` (invalid JSON or nothing recognised), `401` (signature, or the master secret instead of the asset key), `404` (unknown asset), `409` (replayed or older than the last accepted push). A push over 20,000 components is accepted but cut: the response says `"truncated": true` with the original `total`, and a P2 reminds you that the rest is not being checked.
 
 ## WordPress vulnerabilities (Wordfence Intelligence)
 

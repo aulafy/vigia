@@ -68,7 +68,7 @@ Copy `deploy/vigia-checkin.sh` to the backup host and set two variables:
 
 ```bash
 export VIGIA_URL=https://vigia.example.com
-export VIGIA_CHECKIN_SECRET=<the same CHECKIN_SECRET>
+export VIGIA_CHECKIN_SECRET=<this asset's key: run `node server.mjs key acme-shop` on the Vigía host>
 ```
 
 Wrap the backup command:
@@ -103,7 +103,7 @@ For use without the script, from PowerShell, Python or a backup tool's webhook:
 ```text
 POST /api/backup/<assetId>/<jobId>?status=start|success|fail|restore
 x-vigia-timestamp: <unix time in seconds>
-x-vigia-signature: <hex HMAC-SHA256 of "<timestamp>.<path and query>.<body>" with CHECKIN_SECRET>
+x-vigia-signature: <hex HMAC-SHA256 of "<timestamp>.<path and query>.<body>" with the asset's key>
 content-type: application/json
 
 {"bytes": 123456, "objects": 42, "durationS": 310, "restoreTest": true, "message": "…"}

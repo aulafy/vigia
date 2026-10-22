@@ -17,7 +17,7 @@ Availability counts the uptime probes of the month. Rounds skipped because Vigí
 
 **Dashboard:** the *Monthly reports* section links every client's report for this month (so far) and last month. Add `&lang=es` or `&lang=en` to the URL to choose the language.
 
-**Automatically:** when a month ends, Vigía writes every client's report into `data/reports/<client>-<YYYY-MM>.html` and sends one P2: "Monthly reports for 2026-10 are ready". On a fresh install this starts from the next month change.
+**Automatically:** when a month ends (in `DIGEST_TZ`), Vigía writes every client's report into `data/reports/<client>-<hash>-<YYYY-MM>.html` (the short hash keeps clients such as "A&B" and "A B" apart) and sends one P2: "Monthly reports for 2026-10 are ready". On a fresh install this starts from the next month change.
 
 **Command line:**
 
@@ -36,4 +36,4 @@ node server.mjs report all 2026-10                              # every client, 
 
 The `client` field of each asset groups assets into one report. Write it the same way on every asset of the same client.
 
-History is kept for 400 days and availability for about 13 months, so you can still regenerate last year's reports.
+Months are counted in `DIGEST_TZ`, daylight-saving changes included: an incident at 00:30 on 1 October in Madrid belongs to October. History is kept for 400 days and availability for about 13 months, so you can still regenerate last year's reports.

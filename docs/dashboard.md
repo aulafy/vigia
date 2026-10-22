@@ -18,7 +18,7 @@ Vigía's dashboard is a web app with no build step and no dependencies, and you 
 
 On a phone, the bottom bar shows Today, Alerts, Clients, Devices and *More*, which leads to Backups, Reports and Settings. The Alerts icon shows the number of unacknowledged P1 and P2 alerts, and so does the browser tab title.
 
-The dashboard refreshes every 10 seconds and redraws only when something changed, keeping keyboard focus where it was. Every control works from the keyboard, there is a *skip to content* link, priority tags meet 4.5:1 contrast, and touch targets on phones are at least 44 px. It holds the refresh briefly after a tap, so a redraw never swallows a click. If Vigía cannot be reached, a banner says so and the last data received stays on screen. A second banner warns when every alert channel is failing, or when `inventory.json` cannot be read.
+The dashboard refreshes every 10 seconds and redraws only when something changed, keeping keyboard focus where it was. Every control works from the keyboard, there is a *skip to content* link, priority tags meet 4.5:1 contrast, and touch targets on phones are at least 44 px. It holds the refresh briefly after a tap, so a redraw never swallows a click. If Vigía cannot be reached, a banner says so and the last data received stays on screen. Banners tell an expired session (reload to sign in), a server error and a lost connection apart. A second banner warns when every alert channel is failing, or when `inventory.json` cannot be read.
 
 <img src="img/mobile.jpg" alt="Devices on a phone, dark theme" width="320">
 

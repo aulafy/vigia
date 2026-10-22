@@ -7,6 +7,8 @@ Two rules:
 
 Whatever you choose, configure `HEARTBEAT_URL` so that you hear about it when Vigía itself stops.
 
+**Resources.** Node.js 20 or newer. About 150 MB of RAM for a few hundred assets. With `WORDFENCE_API_KEY`, plan for **1 GB**: the Wordfence feed is about 120 MB and is parsed in memory every 6 hours. A few hundred MB of disk for `data/`.
+
 ## Docker Compose (recommended)
 
 ```bash
@@ -65,8 +67,18 @@ git pull && docker compose up -d --build      # Docker
 git pull && sudo systemctl restart vigia      # systemd
 ```
 
-`data/state.json` keeps alerts, acknowledgements and seen KEV entries across restarts and upgrades. It is written atomically, so a crash cannot corrupt it.
+Read the [CHANGELOG](../CHANGELOG.md) before upgrading: entries marked **Breaking** need a configuration change. 0.9, for example, requires `DASH_PASS` in Docker and per-asset keys on your servers.
+
+`data/state.json` keeps alerts, acknowledgements, baselines and history across restarts and upgrades. It is written atomically with fsync, so neither a crash nor a power cut can leave half a file.
 
 ## Backups
 
-Back up `data/inventory.json`, since it is your source of truth. `data/pushed.json` (inventories pushed by servers) and `data/wordfence.json` (feed cache) are rebuilt by the next push and download. `data/state.json` can be deleted at any time. Vigía rebuilds it, but the next scan treats every asset as new and sends an onboarding summary again.
+Back up the whole `data/` folder:
+
+| File | Contains | If lost |
+|---|---|---|
+| `inventory.json` | Your clients and what they run | **Your source of truth: restore it** |
+| `state.json` | Alerts, acknowledgements, accepted baselines (DNS, scripts, registrar…), incident history and availability | Vigía starts over: every asset is onboarded again, accepted changes are forgotten, and **past months can no longer be reported** |
+| `pushed.json` | Inventories pushed by servers | Rebuilt by the next push |
+| `wordfence.json` | Wordfence feed cache | Downloaded again |
+| `reports/` | Monthly reports already written | Regenerate with `node server.mjs report all YYYY-MM` while the history is still in `state.json` |

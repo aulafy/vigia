@@ -33,6 +33,8 @@ Add an `edge` list to any asset. An asset can also consist of edge devices only,
 
 ### Known types
 
+Every device, whatever its type, also reads the research feeds of **Volexity, watchTowr Labs, GreyNoise and Rapid7**. The table lists the vendor feeds on top of those.
+
 | `type` | Device | Advisory feeds | End-of-life |
 |---|---|---|---|
 | `fortigate` | FortiGate (FortiOS, FortiProxy) | Fortinet PSIRT, INCIBE-CERT | ✓ |

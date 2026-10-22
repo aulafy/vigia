@@ -2,7 +2,7 @@
 
 The inventory is a JSON array in `data/inventory.json` (or the file set in `VIGIA_INV`). Each element is one **asset**: usually a website, but it can be any HTTPS endpoint, such as an API, a client portal or a VPN login page.
 
-Vigía re-reads the file on every cycle. Invalid entries are skipped and reported in the log, and the rest keep working.
+Vigía picks up every change to the file without a restart. Invalid entries are skipped and raise a P2 listing the problems, and the rest keep working. A file that does not parse at all never empties the inventory: Vigía keeps using the last valid copy and raises a P2 until it is fixed.
 
 ## Asset fields
 
@@ -11,8 +11,8 @@ Vigía re-reads the file on every cycle. Invalid entries are skipped and reporte
 | `id` | yes | `"acme-shop"` | Unique, stable identifier. Alerts are keyed on it, so do not rename it casually. |
 | `client` | recommended | `"ACME Ltd"` | Shown at the start of every alert. |
 | `name` | recommended | `"Online shop"` | Human-readable name. |
-| `domain` | one of `domain`/`url` | `"example.com"` | Used for the TLS check, and for the uptime check when there is no `url`. |
-| `url` | one of `domain`/`url` | `"https://example.com/health"` | Exact URL for the uptime check. Redirects are followed. |
+| `domain` | `domain`, `url` or `edge` | `"example.com"` | Used for the TLS check, and for the uptime check when there is no `url`. |
+| `url` | `domain`, `url` or `edge` | `"https://example.com/health"` | Exact URL for the uptime check. Redirects are followed. |
 | `expect` | no | `"Add to cart"` | Text that must appear in the response. Catches broken pages that still return 200, such as a white screen, a database error or a defaced homepage. |
 | `criticality` | no (`medium`) | `"high"` | `high`, `medium` or `low`. A high asset turns downtime, KEV matches and critical CVEs into **P1**. |
 | `contact` | no | `"Jane +34 600…"` | Included in downtime alerts so you know who to call. |
@@ -40,7 +40,7 @@ A stack entry describes one piece of software. Which fields you fill decides whi
 ```json
 { "product": "wordpress", "version": "6.4.3" }
 ```
-*KEV.* `product` is matched as a whole word against the vendor and product of each newly added KEV entry.
+*KEV.* `product` is matched as a whole word against the vendor and product of KEV entries: every entry added from now on, and, when the product first appears in the inventory, the entries of the last 90 days.
 
 ```json
 { "product": "apache", "kev": ["apache http server"], "version": "2.4.58" }
@@ -61,7 +61,8 @@ A stack entry describes one piece of software. Which fields you fill decides whi
 { "wp": "plugin", "slug": "contact-form-7", "version": "5.9" }
 ```
 *WordPress.* Matched against Wordfence Intelligence. Use `"wp": "core"` (no slug needed) for WordPress itself, and `"theme"` for themes. See [inventory-push.md](inventory-push.md#wordpress-vulnerabilities-wordfence-intelligence).
-*End-of-life.* `eol` is the product id on [endoflife.date](https://endoflife.date). The version is matched to the most specific release cycle (`8.1.27` belongs to cycle `8.1`). This entry is also checked against KEV, because it has a `product`.
+
+`eol` is the product id on [endoflife.date](https://endoflife.date). The version is matched to the most specific release cycle (`8.1.27` belongs to cycle `8.1`).
 
 ### OSV ecosystems
 
@@ -107,8 +108,16 @@ Common values: `npm`, `Packagist` (Composer), `PyPI`, `Go`, `Maven`, `RubyGems`,
 | Edge device: product in CISA KEV | P1 | P1 |
 | Edge device: vendor advisory, exploited in the wild | P1 | P1 |
 | Edge device: vendor advisory, critical or high | P2 | P2 |
+| Edge device: vendor advisory or research post, exploited in the wild ("0-day exploitation") | P1 | P1 |
+| Edge device: scanning or reconnaissance wave against the product | P2 | P2 |
 | Edge device: management interface reachable from the Internet | P2 | P2 |
+| Edge device: management reachable **and** an exploited vulnerability open | P1 | P1 |
+| Edge device: declared version not confirmed for 60 days | P3 | P3 |
 | Any vulnerability alert whose CVE has EPSS ≥ 50 % | P1 | P1 |
+| A check failing 3 times in a row for one asset or feed (coverage) | P2 | P2 |
+| Pushed inventory cut at 20,000 components | P2 | P2 |
+
+An open alert whose priority gets worse (for example TLS from 10 days to 2) pages again and needs a new acknowledgement. Priorities are never lowered automatically.
 
 ## Domain, DNS and content checks
 
@@ -134,8 +143,6 @@ Point `url` at the page that matters most, such as `/checkout` or `/login`. Add 
 The content check is skipped while the site is down, since the downtime alert already covers it. It only sees the HTML the server sends, not scripts injected later in the browser.
 
 **Accepting a change.** Change alerts (registrar, lock, DNS, SPF/DMARC, redirect, scripts, forms, iframes) show an **Accept change** button in the dashboard and in the phone link. Pressing it makes the new value the baseline and closes the alert. If the change was not yours, do not accept it: investigate.
-
-On the very first run, Vigía records the whole KEV catalogue but alerts only on entries added in the last 14 days. After that, every newly added entry is checked.
 
 ## Building the inventory quickly
 
