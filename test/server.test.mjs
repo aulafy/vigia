@@ -13,12 +13,13 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vigia-it-'));
 const MASTER = 'it-master-secret', PASS = 'it-pass', ACK = 'it-ack-secret';
 let srv, aux, port, auxPort;
-const hooks = [];
+const hooks = [], prompts = [];
 
 const freePort = () => new Promise(r => { const s = http.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
 
 function start(env, { waitFor = 'Vigía on' } = {}) {
-  const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env: { PATH: process.env.PATH, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // never the developer's own .env: it may hold real alert channels
+  const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env: { PATH: process.env.PATH, VIGIA_ENV_FILE: path.join(dir, 'none.env'), ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const done = new Promise(res => {
     const on = d => { out += d; if (waitFor && out.includes(waitFor)) res({ p, out: () => out }); };
@@ -31,11 +32,18 @@ function start(env, { waitFor = 'Vigía on' } = {}) {
 before(async () => {
   [port, auxPort] = [await freePort(), await freePort()];
   // a webhook that records alerts (and their acknowledge links), plus the connectivity probe target
-  aux = http.createServer((q, r) => { let b = ''; q.on('data', d => { b += d; }).on('end', () => { if (q.url === '/hook') hooks.push(JSON.parse(b)); r.end('ok'); }); }).listen(auxPort, '127.0.0.1');
+  aux = http.createServer((q, r) => { let b = ''; q.on('data', d => { b += d; }).on('end', () => {
+    if (q.url === '/hook') hooks.push(JSON.parse(b));
+    // a stand-in for Ollama: records prompts, answers with a reasoning block that Vigía must strip
+    if (q.url === '/api/tags') return r.end(JSON.stringify({ models: [{ name: 'mock-model' }] }));
+    if (q.url === '/api/generate') { const j = JSON.parse(b); prompts.push(j); return r.end(JSON.stringify({ response: `<think>hmm</think>Draft #${prompts.length}` })); }
+    r.end('ok');
+  }); }).listen(auxPort, '127.0.0.1');
   fs.writeFileSync(path.join(dir, 'inventory.json'), JSON.stringify([{ id: 'shop', client: 'ACME', name: 'Shop', url: `http://127.0.0.1:${auxPort}/`, criticality: 'high', backups: [{ id: 'db' }] }]));
   ({ p: srv } = await start({
     PORT: String(port), DASH_PASS: PASS, CHECKIN_SECRET: MASTER, ACK_SECRET: ACK, PUBLIC_URL: `http://127.0.0.1:${port}`, CANARY_DAYS: '0',
     WEBHOOK_URL: `http://127.0.0.1:${auxPort}/hook`, CONNECTIVITY_URLS: `http://127.0.0.1:${auxPort}/ok`,
+    OLLAMA_MODEL: 'mock-model', OLLAMA_URL: `http://127.0.0.1:${auxPort}`,
     VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'), VIGIA_WORDFENCE: path.join(dir, 'wf.json'),
   }));
 });
@@ -142,6 +150,34 @@ test('maintenance windows: alerts wait until the window ends', async () => {
   let got;
   for (let i = 0; i < 60 && !(got = hooks.slice(before).find(h => /after maintenance/.test(h.title) && /nightly/.test(h.title))); i++) await new Promise(res => setTimeout(res, 100));
   assert.ok(got, 'sent when the window ended');
+});
+
+test('local AI: explain and client drafts with Vigía facts, cached, never sent', async () => {
+  const st = await (await fetch(url('/api/state'), { headers: auth })).json();
+  assert.equal(st.config.ai.model, 'mock-model');
+  const alert = st.alerts.find(a => a.key.startsWith('backup:'));
+  assert.ok(alert, 'an alert to explain');
+  const before = hooks.length;
+  let r = await fetch(url(`/api/ai/explain?key=${encodeURIComponent(alert.key)}&lang=es`), { method: 'POST', headers: auth });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.deepEqual([j.text, j.model, j.ai], ['Draft #1', 'mock-model', true]);
+  const sent = prompts.at(-1);
+  assert.equal(sent.model, 'mock-model');
+  assert.equal(sent.stream, false);
+  assert.match(sent.prompt, /Responde en español/);
+  assert.match(sent.prompt, /"client": "ACME"/);
+  assert.match(sent.prompt, /"backup": \{/);
+  r = await fetch(url(`/api/ai/explain?key=${encodeURIComponent(alert.key)}&lang=es`), { method: 'POST', headers: auth });
+  assert.equal((await r.json()).cached, true);
+  assert.equal(prompts.length, 1, 'served from cache');
+  r = await fetch(url(`/api/ai/client?key=${encodeURIComponent(alert.key)}&lang=en&regen=1`), { method: 'POST', headers: auth });
+  assert.equal((await r.json()).text, 'Draft #2');
+  assert.match(prompts.at(-1).prompt, /\[Your name\]/);
+  assert.equal(hooks.length, before, 'nothing is sent to any channel');
+  assert.equal((await fetch(url('/api/ai/decide?key=x'), { method: 'POST', headers: auth })).status, 400);
+  assert.equal((await fetch(url('/api/ai/explain?key=nope'), { method: 'POST', headers: auth })).status, 404);
+  assert.equal((await fetch(url(`/api/ai/explain?key=${encodeURIComponent(alert.key)}`), { method: 'POST', headers: { authorization: auth.authorization } })).status, 403, 'CSRF header required');
 });
 
 // last: it blocks this address for 10 minutes

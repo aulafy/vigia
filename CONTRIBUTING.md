@@ -6,6 +6,7 @@ Thanks for helping. A few principles keep Vigía useful:
 - **Quiet by default.** Every new check must say what makes it P1, P2 or P3. A check that pages people for noise will get Vigía muted.
 - **Pure logic goes in `lib.mjs`, with tests.** Matching, prioritisation and parsing must be unit-testable without network access.
 - **The alert lifecycle lives in `alerts.mjs`.** Raising, escalating, grouping and delivering go through it, never straight to `notify()`, so delivery tracking and retries keep working. `test/alerts.test.mjs` covers it, and `test/server.test.mjs` exercises the real HTTP server.
+- **AI stays outside the alerting path.** `ai.mjs` may explain and draft, from facts Vigía already has; it must never change priorities, acknowledge, or send anything.
 - **Every alert text goes in both languages** in `i18n.mjs`. A test checks that both have the same keys.
 
 ```bash

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import * as L from './lib.mjs';
 import { createAlerts } from './alerts.mjs';
 import { validateAsset, validateWindow, inWindow } from './public/validate.js';
+import * as AI from './ai.mjs';
 import { messages } from './i18n.mjs';
 import { renderReport, previousMonth, monthRange } from './report.mjs';
 
@@ -18,9 +19,10 @@ const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(DIR, 'data');
 fs.mkdirSync(DATA, { recursive: true });
 
-// Minimal .env loader (real environment variables win; quotes are stripped)
+// Minimal .env loader (real environment variables win; quotes are stripped).
+// VIGIA_ENV_FILE points elsewhere (tests and the demo use an empty one, so they never reach your real channels).
 try {
-  for (const l of fs.readFileSync(path.join(DIR, '.env'), 'utf8').split('\n')) {
+  for (const l of fs.readFileSync(process.env.VIGIA_ENV_FILE ?? path.join(DIR, '.env'), 'utf8').split('\n')) {
     const kv = L.parseEnvLine(l);
     if (kv && kv[1] && !process.env[kv[0]]) process.env[kv[0]] = kv[1];
   }
@@ -33,6 +35,7 @@ const {
   CONNECTIVITY_URLS = 'https://www.cloudflare.com/cdn-cgi/trace,https://1.1.1.1/', CHECKIN_ALLOW_MASTER = 'false', DASH_HOSTS = '',
   ALLOW_NO_PASSWORD = 'false', ACK_LINK_DAYS = '7', EDGE_VERSION_DAYS = '60', ADVISORY_MAX_AGE_DAYS = '45',
   EPSS_P1 = '0.5', EPSS_P2 = '0.1', EPSS_URL = 'https://api.first.org/data/v1/epss', ADVISORY_FEED_URLS = '', REPORT_BRAND = '',
+  OLLAMA_MODEL = '', OLLAMA_URL = 'http://127.0.0.1:11434', OLLAMA_TIMEOUT_S = '120',
   WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
@@ -874,6 +877,65 @@ async function editMaintenance(req, u) {
   return [201, { ok: true, window: win }];
 }
 
+// ---------- Local AI (optional): explain an alert, or draft a message for the client ----------
+// Nothing here decides or sends anything. One generation at a time (a laptop runs the model), results cached by alert text.
+const aiCache = new Map();
+let aiQueue = Promise.resolve();
+function ollama(prompt) {
+  const job = aiQueue.then(async () => {
+    const r = await fetch(`${OLLAMA_URL.replace(/\/$/, '')}/api/generate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(+OLLAMA_TIMEOUT_S * 1000),
+      body: JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false, think: false, options: { temperature: 0.2, num_predict: 600 } }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+    return j;
+  });
+  aiQueue = job.catch(() => {});
+  return job;
+}
+
+// What Vigía knows about the asset, component, device or backup behind one alert
+function alertContext(alert) {
+  const all = inventory({ includePaused: true }), asset = all.find(a => a.id === alert.asset), parts = alert.key.split(':'), kind = parts[0];
+  const ctx = { asset, now: Date.now() };
+  if (!asset) return ctx;
+  ctx.status = state.status[asset.id];
+  ctx.domain = state.domain[asset.id];
+  const { _pending, ...dns } = state.dns[asset.id] || {}; ctx.dns = dns;
+  const pick = s => s && Object.fromEntries(Object.entries(s).filter(([k, v]) => !['edgeIndex', 'feeds', 'adv', 'kev', 'edge'].includes(k) && v != null));
+  if (kind === 'osv') ctx.component = pick(asset.stack.find(x => x.ecosystem && x.name === parts.slice(3).join(':')));
+  if (kind === 'wp') ctx.component = pick(asset.stack.find(x => x.wp && L.wpKey(x) === parts.slice(3).join(':')));
+  if (kind === 'eol') ctx.component = pick(asset.stack.find(x => x.eol === parts[2]));
+  if (kind === 'kev' && alert.term) ctx.component = pick(asset.stack.find(x => L.kevTerm(x) === alert.term));
+  if (alert.dev) ctx.device = pick(asset.stack.find(x => x.edge && `${asset.id}:${x.edgeIndex}` === alert.dev));
+  if (kind === 'backup') ctx.backup = state.backups[parts.slice(2).join(':')];
+  ctx.maintenance = muted(asset.id);
+  return ctx;
+}
+
+async function aiDraft(req, u) {
+  if (!OLLAMA_MODEL) return [503, { error: 'aiDisabled' }];
+  const mode = u.pathname.split('/')[3], key = u.searchParams.get('key'), lang = u.searchParams.get('lang') || VIGIA_LANG;
+  if (!AI.MODES.includes(mode)) return [400, { error: 'unknownMode' }];
+  const alert = state.alerts[key];
+  if (!alert) return [404, { error: 'unknownAlert' }];
+  const cacheKey = [mode, lang, key, shortHash(`${alert.prio}|${alert.title}|${alert.body}`)].join('|');
+  if (aiCache.has(cacheKey) && u.searchParams.get('regen') !== '1') return [200, { ...aiCache.get(cacheKey), cached: true }];
+  const t0 = Date.now();
+  try {
+    const j = await ollama(AI.promptFor(mode, AI.factsFor(alert, alertContext(alert)), lang));
+    const text = AI.cleanOutput(j.response);
+    if (!text) return [502, { error: 'emptyAnswer' }];
+    const out = { text, model: OLLAMA_MODEL, ms: Date.now() - t0, ai: true };
+    aiCache.set(cacheKey, out);
+    if (aiCache.size > 100) aiCache.delete(aiCache.keys().next().value);
+    return [200, out];
+  } catch (e) {
+    return e.name === 'TimeoutError' ? [504, { error: 'timeout', detail: `no answer in ${OLLAMA_TIMEOUT_S} s` }] : [502, { error: 'ollama', detail: e.message }];
+  }
+}
+
 // ---------- Monthly report per client ----------
 const clientsOf = inv => [...new Set(inv.map(a => a.client).filter(Boolean))].sort();
 // "A&B" and "A B" would share a slug: a short hash keeps every client's file apart
@@ -951,6 +1013,13 @@ setTimeout(() => every('dns', 5 * 60_000, inv => onboard(inv, 'dns', () => check
 setTimeout(() => every('content', 15 * 60_000, inv => onboard(inv, 'web', () => checkContent(inv))), 20_000); // after the first uptime pass
 setTimeout(() => every('domain', 6 * 3600_000, inv => onboard(inv, 'domain', () => checkDomains(inv))), 40_000);
 every('backups', 5 * 60_000, checkBackups);
+if (OLLAMA_MODEL) every('ai', 10 * 60_000, async () => {
+  try {
+    const tags = await getJSON(`${OLLAMA_URL.replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    const has = (tags.models || []).some(m => m.name === OLLAMA_MODEL || m.name === `${OLLAMA_MODEL}:latest`);
+    state.aiStatus = has ? { ok: true } : { ok: false, err: `model ${OLLAMA_MODEL} not installed (ollama pull ${OLLAMA_MODEL})` };
+  } catch (e) { state.aiStatus = { ok: false, err: `Ollama not reachable at ${OLLAMA_URL}: ${e.message}` }; }
+});
 setTimeout(() => every('wordpress', 30 * 60_000, inv => onboard(inv, 'wp', () => checkWordPress(inv))), 25_000); // after KEV is loaded
 every('inventory', 15 * 60_000, checkInventoryAge);
 setTimeout(() => every('edge', 15 * 60_000, inv => onboard(inv, 'adv', () => checkEdge(inv))), 35_000); // after KEV is loaded
@@ -1130,7 +1199,7 @@ http.createServer(async (req, res) => {
     inventory: inventory({ includePaused: true }).map(a => ({ ...a, stack: a.stack.filter(x => !x.edge).slice(0, 6), stackCount: a.stack.length,
       edge: a.stack.filter(x => x.edge).map(({ name, type, product, version, portal, management, edgeIndex }) => ({ name, type, product, version, portal, management, edgeIndex })),
       avail: state.avail[a.id]?.[monthOf()] || null })),
-    config: { checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
+    config: { ai: OLLAMA_MODEL ? { model: OLLAMA_MODEL, ...(state.aiStatus || { ok: null }) } : null, checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
       canaryDays: +CANARY_DAYS, epss: [+EPSS_P1, +EPSS_P2], digestHour: +DIGEST_HOUR, timeZone: DIGEST_TZ, brand: REPORT_BRAND, inventoryError: inv$.broken },
     status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     maintenance: (state.maintenance || []).filter(w => Date.parse(w.to) > Date.now()),
@@ -1149,6 +1218,7 @@ http.createServer(async (req, res) => {
     const [code, out] = await editInventory(req, u); return json(out, code);
   }
   if (u.pathname === '/api/maintenance' || u.pathname.startsWith('/api/maintenance/')) { const [code, out] = await editMaintenance(req, u); return json(out, code); }
+  if (u.pathname.startsWith('/api/ai/') && req.method === 'POST') { const [code, out] = await aiDraft(req, u); return json(out, code); }
   if (u.pathname === '/api/reports') return json({ clients: clientsOf(inventory({ includePaused: true })), months: [monthOf(), previousMonth(monthOf())] });
   if (u.pathname === '/report') {
     const client = u.searchParams.get('client'), month = u.searchParams.get('month') || monthOf();

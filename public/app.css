@@ -103,6 +103,13 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:var(
 @keyframes pulse{50%{opacity:.5}}
 
 /* phone: bottom tab bar instead of the sidebar */
+/* local AI drafts */
+.aibtns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.btn.ghost2{border-color:transparent;color:var(--accent);padding-left:6px;padding-right:6px}
+.aipanel{margin-top:10px;border:1px dashed var(--accent-line);background:var(--accent-soft);border-radius:var(--r-sm);padding:10px 12px}
+.ailabel{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--accent);margin-bottom:6px}
+.aiout{white-space:pre-wrap;font-size:13.5px;line-height:1.55;color:var(--ink)}.err{color:var(--red)}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--accent-line);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:-2px}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* editor and maintenance forms */
 .editor .section,.mtform{margin-top:6px}
 .grid2,.grid3,.grid4{display:grid;gap:12px 14px}.grid2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid4{grid-template-columns:repeat(4,minmax(0,1fr))}

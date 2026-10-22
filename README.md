@@ -141,6 +141,10 @@ Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented 
 
 A web app you can install on your phone, in light or dark mode, with seven sections: **Today, Alerts, Clients, Devices, Backups, Reports, Settings**. Acknowledge a P1 from the phone, open a client to see everything about it, **add and edit assets, devices and backup jobs without touching JSON**, schedule **maintenance windows**, and print the monthly report. Try it with `npm run demo`. See **[docs/dashboard.md](docs/dashboard.md)**.
 
+## Local AI (optional)
+
+With [Ollama](https://ollama.com) and `OLLAMA_MODEL` set, every alert gets **Explain** (what happens, the risk, steps, how to check) and **Draft for the client** (a plain-language message to copy). The model gets only the facts Vigía has about that alert, so it does not invent providers or versions. Everything runs on your machine, and the AI never decides, acknowledges or sends anything. See **[docs/ai.md](docs/ai.md)**.
+
 ## Monthly client reports
 
 One printable page per client and month: availability, incidents, response times, backups, edge devices and recommended actions. Open it from the dashboard, or let Vigía write all of them when the month ends. See **[docs/reports.md](docs/reports.md)**.
@@ -178,6 +182,7 @@ All settings are environment variables, which can live in `.env`:
 | `EPSS_P1`, `EPSS_P2` | `0.5`, `0.1` | EPSS thresholds for escalating alerts |
 | `ADVISORY_FEED_URLS` | — | `name=url,…` to replace or add advisory feeds |
 | `REPORT_BRAND` | — | Your company name on client reports |
+| `OLLAMA_MODEL`, `OLLAMA_URL`, `OLLAMA_TIMEOUT_S` | —, `http://127.0.0.1:11434`, `120` | Optional local AI for explanations and client drafts ([docs/ai.md](docs/ai.md)) |
 | `CONNECTIVITY_URLS` | Cloudflare trace, `1.1.1.1` | Probed before each uptime round. If none answers, Vigía is the one offline: the round is skipped instead of paging for every site. |
 | `CHECKIN_ALLOW_MASTER` | `false` | Servers sign with their asset's key (`node server.mjs key <asset>`). Set `true` only while migrating from versions before 0.9 |
 | `ALLOW_NO_PASSWORD` | `false` | Vigía refuses to listen beyond localhost without `DASH_PASS`, unless this is `true` |
@@ -201,6 +206,7 @@ All settings are environment variables, which can live in `.env`:
 | `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
 | `GET /api/inventory`, `POST /api/assets`, `PUT/DELETE /api/assets/<id>`, `POST /api/assets/<id>/pause` | dashboard | Edit the inventory. Every write sends the revision it started from (`409` if the file changed meanwhile) and keeps a copy in `data/inventory-history/` |
 | `GET/POST /api/maintenance`, `DELETE /api/maintenance/<id>` | dashboard | Maintenance windows |
+| `POST /api/ai/explain\|client?key=…` | dashboard | Local AI explanation or client draft for one alert (never sent anywhere) |
 | `POST /api/test` | dashboard | Send a test P1 to every channel. Answers `400` with no channel configured and `502` if none delivered it |
 | `GET /healthz` | none | Liveness check for Docker or your load balancer |
 
@@ -208,6 +214,7 @@ All settings are environment variables, which can live in `.env`:
 
 Be honest with your clients about what is covered:
 
+- **Its AI is not an analyst.** The optional local model only explains and drafts, from Vigía's facts. Read what it writes before using it.
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
 - **PrestaShop, Joomla and Drupal modules** are not covered by a dedicated feed yet: only through OSV (Composer packages) and KEV. WordPress is covered through Wordfence.
 - **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers.
@@ -226,6 +233,7 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `alerts.mjs` holds the alert lifecycle (raise, escalate, group, deliver, retry), with the transport injected and the lifecycle tested without a network.
 - `i18n.mjs` holds the alert texts in English and Spanish.
 - `report.mjs` renders the monthly client report (pure functions).
+- `ai.mjs` builds the grounded prompts for the optional local AI (pure functions).
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
 - `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 

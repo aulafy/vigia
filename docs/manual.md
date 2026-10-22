@@ -26,6 +26,7 @@ Edit `.env`. These are the settings that matter on day one:
 | `VIGIA_LANG` | Alerts and dashboard in `en` or `es` | |
 | `PUBLIC_URL` + `ACK_SECRET` | "Acknowledge" button inside notifications (needs HTTPS) | Your public URL and `openssl rand -hex 32` |
 | `WORDFENCE_API_KEY` | WordPress plugin and theme vulnerabilities | Free key at wordfence.com/products/wordfence-intelligence |
+| `OLLAMA_MODEL` | Optional: **Explain** and **Draft for the client** buttons on every alert | `ollama pull qwen3.5:9b`, then `OLLAMA_MODEL=qwen3.5:9b` ([ai.md](ai.md)) |
 
 Start it:
 
@@ -116,6 +117,8 @@ Both scripts need only `sh`, `openssl` and `curl`. Details: [inventory-push.md](
 | **P1** | Act now, night included | Push that repeats every 10 min until acknowledged |
 | **P2** | Act within hours | One push |
 | **P3** | Plan it | Daily digest only |
+
+Not sure what an alert means, or how to tell the client? With local AI on, press **Explain** or **Draft for the client** under it. You get a draft built from Vigía's facts; check it before using it.
 
 **Acknowledge** = "I'm on it": stops the repeats; the alert stays open until the problem is gone. **Accept change** (on change alerts) = "this change was mine": the new value becomes the baseline. Never accept a change you don't recognise. If an open alert gets worse, it pages again even if you acknowledged it.
 

@@ -5,7 +5,7 @@ import { ed, openEditor, editorPage, onInput as editorInput, onAction as editorA
 
 const esc = M.esc;
 const root = document.getElementById('root');
-const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '' };
+const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '', ai: {} };
 
 // per-viewer preferences only (theme, language); everything that matters lives on the server
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } return null; };
@@ -60,7 +60,44 @@ function alertRow(a, idx, { client = true } = {}) {
   const meta = [client ? esc(c || t.system) : '', esc(ago(a.first)), a.epss ? `EPSS ${Math.round(a.epss * 100)} %` : ''].filter(Boolean).join(' · ');
   const action = a.ack ? `<span class="mut small">${esc(t.acked)}</span>`
     : `<button class="btn small ${a.prio === 'P1' ? 'primary' : ''}" data-act="ack" data-key="${esc(a.key)}">${icon('check', 'sm')}${esc(a.accept ? t.accept : t.ack)}</button>`;
-  return `<div class="row alert ${a.ack ? 'acked' : ''}"><span class="tag ${a.prio}">${a.prio}</span><div class="main"><div class="title">${esc(a.title)}</div><div class="meta">${meta}</div><div class="body clamp ${ui.open.has(a.key) ? 'open' : ''}" data-act="expand" data-key="${esc(a.key)}" role="button" tabindex="0" aria-expanded="${ui.open.has(a.key)}" aria-label="${esc(ui.open.has(a.key) ? t.showLess : t.showMore)}: ${esc(a.title)}">${esc(a.body)}</div></div><div class="side-r">${action}</div></div>`;
+  const ai = ui.S?.config?.ai, A = t.ai;
+  // Vigía's own alerts (feeds, channels, weekly test) have no client to write to
+  const aiBtns = ai ? `<div class="aibtns">${(a.asset ? ['explain', 'client'] : ['explain']).map(mode => `<button class="btn small ghost2" data-act="ai" data-key="${esc(a.key)}" data-v="${mode}">${icon(mode === 'explain' ? 'sparkle' : 'mail', 'sm')}${esc(A[mode])}</button>`).join('')}</div>` : '';
+  const panels = ['explain', 'client'].map(mode => aiPanel(a.key, mode, t)).join('');
+  return `<div class="row alert ${a.ack ? 'acked' : ''}"><span class="tag ${a.prio}">${a.prio}</span><div class="main"><div class="title">${esc(a.title)}</div><div class="meta">${meta}</div><div class="body clamp ${ui.open.has(a.key) ? 'open' : ''}" data-act="expand" data-key="${esc(a.key)}" role="button" tabindex="0" aria-expanded="${ui.open.has(a.key)}" aria-label="${esc(ui.open.has(a.key) ? t.showLess : t.showMore)}: ${esc(a.title)}">${esc(a.body)}</div>${aiBtns}${panels}</div><div class="side-r">${action}</div></div>`;
+}
+
+// The AI draft under an alert: clearly marked, copyable, never sent
+function aiPanel(key, mode, t) {
+  const p = ui.ai[`${mode}|${key}`];
+  if (!p) return '';
+  const A = t.ai, model = ui.S?.config?.ai?.model || 'Ollama', id = `${mode}|${key}`;
+  const body = p.status === 'loading' ? `<p class="mut small"><span class="spin"></span> ${esc(A.generating.replace('{model}', model))}</p>`
+    : p.status === 'error' ? `<p class="err small">${esc(A.error.replace('{err}', p.error))}</p>`
+    : `<div class="aiout" id="ai-${esc(shortId(id))}">${esc(p.text)}</div>`;
+  return `<div class="aipanel" role="region" aria-label="${esc(mode === 'explain' ? A.modeExplain : A.modeClient)}"><div class="ailabel">${icon('sparkle', 'sm')}${esc(A.label.replace('{model}', p.model || model))}</div>${body}
+    <div class="aibtns">${p.status === 'done' ? `<button class="btn small" data-act="ai-copy" data-key="${esc(id)}">${esc(A.copy)}</button>` : ''}
+    ${p.status !== 'loading' ? `<button class="btn small" data-act="ai" data-key="${esc(key)}" data-v="${mode}" data-k="regen">${esc(A.regen)}</button>` : ''}
+    <button class="btn small ghost2" data-act="ai-close" data-key="${esc(id)}">${esc(A.close)}</button></div></div>`;
+}
+const shortId = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(36);
+
+async function aiRun(key, mode, regen) {
+  const id = `${mode}|${key}`;
+  ui.ai[id] = { status: 'loading' }; render();
+  try {
+    const r = await fetch(`/api/ai/${mode}?key=${encodeURIComponent(key)}&lang=${lang().startsWith('es') ? 'es' : 'en'}${regen ? '&regen=1' : ''}`, { method: 'POST', headers: { 'x-vigia-ui': '1' } });
+    const j = await r.json().catch(() => ({}));
+    ui.ai[id] = r.ok ? { status: 'done', text: j.text, model: j.model } : { status: 'error', error: j.detail || j.error || `HTTP ${r.status}` };
+  } catch (e) { ui.ai[id] = { status: 'error', error: e.message }; }
+  render();
+}
+
+function copyText(text) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  const ta = Object.assign(document.createElement('textarea'), { value: text }); // http on a LAN has no clipboard API
+  document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  return Promise.resolve();
 }
 
 function siteRow(a, S, { actions = false } = {}) {
@@ -157,6 +194,7 @@ const PAGES = {
           <dt>${esc(t.heartbeat)}</dt><dd>${yn(S.notify?.heartbeat)}</dd><dt>${esc(t.phoneAck)}</dt><dd>${yn(S.notify?.phoneAck)}</dd>
           <dt>${esc(t.checkin)}</dt><dd>${yn(c.checkin)}</dd><dt>${esc(t.wordfence)}</dt><dd>${yn(c.wordfence)}</dd>
           <dt>${esc(t.password)}</dt><dd>${yn(c.dashPass)}</dd><dt>${esc(t.canary)}</dt><dd>${esc(c.canaryDays ? `${t.every} ${c.canaryDays} ${t.days}` : t.off)}</dd>
+          <dt>${esc(t.ai.title)}</dt><dd>${S.config?.ai ? `<span class="pill ${S.config.ai.ok === false ? 'warn' : 'ok'}">${esc(S.config.ai.ok === false ? t.ai.unavailable : t.ai.on)}</span> ${esc(S.config.ai.model)}${S.config.ai.err ? `<br><span class="small mut">${esc(S.config.ai.err)}</span>` : ''}` : `<span class="pill">${esc(t.ai.off)}</span><br><span class="small mut">${esc(t.ai.offHint)}</span>`}</dd>
           <dt>EPSS</dt><dd>P1 ≥ ${Math.round((c.epss?.[0] ?? 0.5) * 100)} % · P2 ≥ ${Math.round((c.epss?.[1] ?? 0.1) * 100)} %</dd>
           <dt>Vigía</dt><dd>v${esc(S.version)} · <a href="https://github.com/aulafy/vigia#readme" target="_blank" rel="noopener">${esc(t.docs)} ${icon('ext', 'sm')}</a></dd></dl></div>
       </div>`
@@ -244,6 +282,9 @@ root.addEventListener('click', async e => {
   if (act === 'ack') { b.disabled = true; try { await api('POST', `/api/ack?key=${encodeURIComponent(b.dataset.key)}`); toast(`${t.acked} ✓`); } catch (err) { toast(err.message); } return refresh(); }
   if (act === 'test') { try { await api('POST', '/api/test'); toast(t.testSent); } catch (err) { toast(err.message); } return; }
   if (act === 'expand') return toggleExpand(b);
+  if (act === 'ai') return aiRun(b.dataset.key, b.dataset.v, b.dataset.k === 'regen');
+  if (act === 'ai-close') { delete ui.ai[b.dataset.key]; return render(); }
+  if (act === 'ai-copy') { const p = ui.ai[b.dataset.key]; if (p?.text) await copyText(p.text).then(() => toast(t.ai.copied), () => toast(t.ai.copied)); return; }
   if (['save', 'row-add', 'row-del', 'asset-del', 'pause'].includes(act)) { e.preventDefault(); if (await editorAction(act, b, { t, toast, go: h => { location.hash = h; }, refresh })) { ui.html = ''; render(); } return; }
   if (act === 'mt-start' || act === 'mt-end') { e.preventDefault(); return onMaintenanceAction(act, b, ui.S, { t, toast, refresh }); }
   if (act === 'filter') { ui.filter[b.dataset.k] = b.dataset.v; return render(); }

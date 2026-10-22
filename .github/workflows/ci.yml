@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs && node --check report.mjs && node --check alerts.mjs && for f in public/*.js scripts/*.mjs; do node --check "$f"; done
+      - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs && node --check report.mjs && node --check alerts.mjs && node --check ai.mjs && for f in public/*.js scripts/*.mjs; do node --check "$f"; done
       - run: npm test
       - run: sh -n deploy/vigia-checkin.sh && sh -n deploy/vigia-collect.sh
       - run: node -e "JSON.parse(require('fs').readFileSync('inventory.example.json','utf8'))"

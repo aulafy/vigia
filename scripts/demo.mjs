@@ -30,6 +30,7 @@ http.createServer((req, res) => {
 }).listen(SITE_PORT, '127.0.0.1');
 
 Object.assign(process.env, {
+  VIGIA_ENV_FILE: path.join(dir, 'none.env'), // the demo never uses your real .env (alert channels, secrets)
   VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'),
   VIGIA_WORDFENCE: path.join(dir, 'wordfence.json'), CHECKIN_SECRET: SECRET, CANARY_DAYS: '0', PORT: String(PORT),
   CONNECTIVITY_URLS: site('ok'), REPORT_BRAND: 'Demo IT Services', VIGIA_LANG: process.env.VIGIA_LANG || 'es',

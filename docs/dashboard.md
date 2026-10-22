@@ -32,6 +32,10 @@ The dashboard refreshes every 10 seconds and redraws only when something changed
 - If the file changed since the form was opened (a hand edit, or another tab), saving is refused with a warning, and your changes stay in the form so you can review them and save again.
 - **Pause** stops every check of an asset and keeps its alerts. Delete asks for confirmation.
 
+## Local AI drafts
+
+With `OLLAMA_MODEL` set, each alert has **Explain** and **Draft for the client** buttons (only **Explain** on Vigía's own alerts). The answer appears under the alert, marked as an AI draft, with Copy, Regenerate and Close. It takes about 20–30 s with a 9B model on a laptop. See [ai.md](ai.md).
+
 ## Maintenance windows
 
 On a client's page (for that client or one asset) or in Settings (also for everything), choose a duration (1, 2, 4 or 8 hours, until 08:00 tomorrow, or a custom start and end) and an optional reason. While the window is active, alerts are recorded but not sent, and planned downtime does not count against availability. **End now** closes the window early. See [alerts.md](alerts.md#maintenance-windows).

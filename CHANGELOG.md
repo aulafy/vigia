@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0 — 2026-10-23
+
+### Added
+- **Local AI (optional, Ollama):** two buttons on every alert. **Explain** covers what is happening, the real risk, numbered steps and how to check the fix. **Draft for the client** writes a short, jargon-free message to copy into an e-mail or WhatsApp. Both are marked as an AI draft. Nothing is sent, and the AI never changes priorities or acknowledges anything.
+- **Grounded prompts** (`ai.mjs`): the model gets only what Vigía knows about that alert (registrar, DNS and SPF/DMARC records, component version, device, backup run, site status, EPSS…). Every unknown fact is listed as unknown, so the model does not fill gaps: without the registrar it had suggested "GoDaddy or Cloudflare" for a NameCheap domain; with it, it said NameCheap. Feed text is fenced as data.
+- One generation at a time, a cache per alert text, and a time limit. **Settings** shows whether the model is installed and reachable. The configuration is `OLLAMA_MODEL` (enables it), `OLLAMA_URL` and `OLLAMA_TIMEOUT_S`.
+- `POST /api/ai/explain` and `POST /api/ai/client`.
+
+### Fixed
+- Tests and `npm run demo` no longer read your own `.env`. They could send test alerts to your real channels (`VIGIA_ENV_FILE` selects the file).
+
 ## 0.10.0 — 2026-10-23
 
 ### Added
