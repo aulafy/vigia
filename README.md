@@ -7,6 +7,8 @@
 ![Zero dependencies](https://img.shields.io/badge/dependencies-0-blue)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+![Vigía dashboard](docs/img/dashboard.jpg)
+
 If you run IT for many small companies, you cannot read every CVE, advisory and release note that comes out. You also cannot miss the one that hits a client's shop at 3 a.m. Vigía turns this around. You describe what each client runs, and Vigía keeps watching public vulnerability sources and the sites themselves. It sends a phone alert only when **a new problem matches something you actually run**.
 
 ```text
@@ -65,6 +67,7 @@ git clone https://github.com/aulafy/vigia.git
 cd vigia
 cp .env.example .env              # set at least NTFY_TOPIC
 npm start                         # dashboard on http://localhost:4848
+npm run demo                      # or: try it first with demo clients (nothing is written to data/)
 ```
 
 1. Install the **[ntfy](https://ntfy.sh)** app (iOS/Android) and subscribe to the topic you put in `NTFY_TOPIC`. Pick a long random name: anyone who knows a topic on the public ntfy.sh server can read it.
@@ -124,6 +127,10 @@ The domain, DNS and content checks need nothing in `stack`, because they work fr
 
 Every field, including `paused`, `failThreshold` and `timeoutMs`, is documented in **[docs/inventory.md](docs/inventory.md)**, along with tips for generating the inventory from lockfiles and SBOMs.
 
+## Dashboard
+
+A web app you can install on your phone, in light or dark mode, with seven sections: **Today, Alerts, Clients, Devices, Backups, Reports, Settings**. Acknowledge a P1 from the phone, open a client to see everything about it, and print its monthly report. Try it with `npm run demo`. See **[docs/dashboard.md](docs/dashboard.md)**.
+
 ## Monthly client reports
 
 One printable page per client and month: availability, incidents, response times, backups, edge devices and recommended actions. Open it from the dashboard, or let Vigía write all of them when the month ends. See **[docs/reports.md](docs/reports.md)**.
@@ -171,7 +178,7 @@ All settings are environment variables, which can live in `.env`:
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /` | dashboard | Web dashboard |
+| `GET /` | dashboard | Web dashboard (installable app; its static files are public, the data is not) |
 | `GET /api/state` | dashboard | Inventory, status, alerts and feed timestamps as JSON |
 | `POST /api/ack?key=…` | dashboard | Acknowledge an alert. For a change alert, this also accepts the new value as the baseline. |
 | `GET/POST /api/ack?key=…&sig=…` | signed link | Acknowledge from a notification. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
@@ -200,7 +207,9 @@ npm test          # unit tests (node:test, no dependencies)
 - `server.mjs` holds the scheduler, the checks, the notifications and the HTTP server.
 - `lib.mjs` holds the pure logic: matching, priorities, validation and signatures. It is unit tested.
 - `i18n.mjs` holds the alert texts in English and Spanish.
-- `index.html` is the dashboard: one file, no build step.
+- `report.mjs` renders the monthly client report (pure functions).
+- `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
+- `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 
 Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
 

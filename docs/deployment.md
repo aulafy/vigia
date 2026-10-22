@@ -50,7 +50,7 @@ sudo pmset -a sleep 0
 
 ## Exposing the dashboard (optional)
 
-Only needed if you want to open the dashboard remotely or acknowledge from your phone.
+Only needed if you want to open the dashboard remotely, acknowledge from your phone, or **install the dashboard as an app**, since browsers only install apps served over HTTPS.
 
 - Put Vigía behind a reverse proxy with HTTPS. With [Caddy](https://caddyserver.com) this is one line: `vigia.example.com { reverse_proxy 127.0.0.1:4848 }`.
 - Set `DASH_PASS` so that the dashboard requires a login.

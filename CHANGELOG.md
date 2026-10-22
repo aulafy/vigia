@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 — 2026-10-23
+
+### Added
+- **New dashboard**, an installable web app (manifest, service worker and icons) in the style of REM-L: graphite sidebar on computers, bottom tab bar on phones, and automatic, light or dark theme. Seven sections: **Today** (overall status, urgent list, channel and feed health), **Alerts** (filters by state, priority, client and text, acknowledge or accept change), **Clients** (per-client detail with sites, devices, backups, alerts and reports), **Devices**, **Backups**, **Reports** and **Settings** (theme, language, channels, feeds, configuration, test alert). Spanish and English.
+- `npm run demo`: three fictional clients with local sites, devices and backups, in a temporary folder.
+- `npm run icons`: draws the PNG app icons with no dependencies.
+- `/api/state` now includes each asset's edge devices and monthly availability, the version and configuration flags.
+
+### Changed
+- The dashboard moved from `index.html` to `public/`. Static files are public (they hold no data). The page itself still asks for `DASH_PASS`, and the data stays behind authentication.
+- The dashboard holds its 10-second redraw briefly after a tap, so clicks are never lost.
+- The Docker image now copies `public/` and `package.json`.
+
 ## 0.7.0 — 2026-10-22
 
 ### Added

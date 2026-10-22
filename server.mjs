@@ -37,7 +37,8 @@ const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
 const STATE_F = process.env.VIGIA_STATE || path.join(DATA, 'state.json');
 const T = messages(VIGIA_LANG);
 const REPEAT_P1_MS = 10 * 60_000;
-const UA = { 'user-agent': 'vigia/0.7 (+https://github.com/aulafy/vigia)' };
+const VERSION = JSON.parse(fs.readFileSync(path.join(DIR, 'package.json'), 'utf8')).version;
+const UA = { 'user-agent': `vigia/${VERSION} (+https://github.com/aulafy/vigia)` };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const START = Date.now();
 
@@ -932,6 +933,10 @@ const authHeader = DASH_PASS ? Buffer.from('Basic ' + Buffer.from('vigia:' + DAS
 const authOk = h => { const b = Buffer.from(String(h || '')); return b.length === authHeader.length && crypto.timingSafeEqual(b, authHeader); };
 // Without a password, only these Host names may load the dashboard (blocks DNS-rebinding pages from reading it)
 const dashHosts = new Set(['localhost', '127.0.0.1', '[::1]', HOST, PUBLIC_URL && new URL(PUBLIC_URL).hostname, ...DASH_HOSTS.split(',')].filter(Boolean).map(h => h.trim().toLowerCase()));
+const PUBLIC = path.join(DIR, 'public');
+const STATIC_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
+const STATIC = new Set(fs.existsSync(PUBLIC) ? fs.readdirSync(PUBLIC).filter(f => STATIC_TYPES[path.extname(f)]) : []);
 const SECURITY_HEADERS = { 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
   'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" };
 const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -940,6 +945,15 @@ http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const json = (o, c = 200) => { res.writeHead(c, { 'content-type': 'application/json', ...SECURITY_HEADERS }); res.end(JSON.stringify(o)); };
   const html = (s, c = 200) => { res.writeHead(c, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS }); res.end(s); };
+
+  // the installable app shell (no client data in it)
+  const file = u.pathname === '/' ? 'index.html' : u.pathname.slice(1);
+  if (req.method === 'GET' && STATIC.has(file)) {
+    if (file === 'index.html' && authHeader && !authOk(req.headers.authorization)) { res.writeHead(401, { 'www-authenticate': 'Basic realm="Vigia"' }); return res.end('unauthorized'); }
+    res.writeHead(200, { 'content-type': STATIC_TYPES[path.extname(file)], 'cache-control': 'no-cache', ...SECURITY_HEADERS,
+      ...(file === 'sw.js' && { 'service-worker-allowed': '/' }) });
+    return res.end(fs.readFileSync(path.join(PUBLIC, file)));
+  }
 
   // unauthenticated, so it says nothing about clients (feed errors contain their domains)
   if (u.pathname === '/healthz') return json({ ok: true, uptimeAt: state.feeds.uptime || null });
@@ -970,7 +984,13 @@ http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.headers['x-vigia-ui'] !== '1') return json({ error: 'missing x-vigia-ui header' }, 403);
 
   if (u.pathname === '/api/state') return json({
-    lang: VIGIA_LANG, inventory: inventory({ includePaused: true }).map(a => ({ ...a, stack: a.stack.slice(0, 6), stackCount: a.stack.length })), status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
+    version: VERSION, lang: VIGIA_LANG, month: monthOf(),
+    inventory: inventory({ includePaused: true }).map(a => ({ ...a, stack: a.stack.filter(x => !x.edge).slice(0, 6), stackCount: a.stack.length,
+      edge: a.stack.filter(x => x.edge).map(({ name, type, product, version, portal, management, edgeIndex }) => ({ name, type, product, version, portal, management, edgeIndex })),
+      avail: state.avail[a.id]?.[monthOf()] || null })),
+    config: { checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER !== 'false', wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
+      canaryDays: +CANARY_DAYS, epss: [+EPSS_P1, +EPSS_P2], digestHour: +DIGEST_HOUR, timeZone: DIGEST_TZ, brand: REPORT_BRAND, inventoryError: inv$.broken },
+    status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
     pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: Object.fromEntries(Object.entries(state.backups).map(([k, v]) => [k, { ...v, lastSig: undefined }])),
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
@@ -984,7 +1004,6 @@ http.createServer(async (req, res) => {
     try { return html(renderReport(reportData(client, month), u.searchParams.get('lang') || VIGIA_LANG)); }
     catch (e) { return json({ error: e.message }, 400); }
   }
-  if (u.pathname === '/') return html(fs.readFileSync(path.join(DIR, 'index.html')));
   json({ error: 'not found' }, 404);
 }).listen(PORT, HOST, () => {
   const ch = [NTFY_TOPIC && 'ntfy', TELEGRAM_BOT_TOKEN && 'telegram', WEBHOOK_URL && 'webhook'].filter(Boolean).join('+') || 'NONE (console only)';
