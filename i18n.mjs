@@ -137,6 +137,12 @@ const en = {
   enrolled: (client, n) => `${client}: ${n} computer${n === 1 ? '' : 's'} added today`,
   enrolledBody: hosts => `Added from the install line: ${hosts.join(', ')}. If you do not recognise one, delete it in the dashboard and generate a new line.`,
   mailFooter: url => `${url ? `Dashboard: ${url}\n` : ''}Sent by Vigía. You receive this because your address is in MAIL_TO.`,
+  clientTag: (k, p) => `[${k === 'resolved' ? 'Resolved' : k === 'test' ? 'Test' : { P1: 'Urgent', P2: 'Important', P3: 'Notice' }[p]}${k === 'worse' ? ', worse' : k === 'after' ? ', still open after maintenance' : ''}]`,
+  clientMailMany: (n, client) => `[Vigía] ${n} notices for ${client}`,
+  clientMailBody: (items, { client, brand, url }) => `Hello,\n\nVigía, the system that watches your services${brand ? ` for ${brand}` : ''}, reports:\n\n${items.map(i => `${en.clientTag(i.kind, i.prio)} ${i.title}${i.body ? `\n${i.body}` : ''}`).join('\n\n')}\n\n${items.every(i => i.kind === 'resolved' || i.kind === 'test') ? '' : 'Your IT team has been notified and is on it.\n'}${url ? `Live status: ${url}\n` : ''}\n--\nAutomatic message. You receive it because your address is on the alert list of ${client}.`,
+  clientMailFailed: client => `E-mail to ${client} could not be sent`,
+  clientTestTitle: 'E-mail alerts test',
+  clientTestBody: 'If you are reading this, Vigía alerts will reach this address.',
 };
 
 const es = {
@@ -277,6 +283,12 @@ const es = {
   enrolled: (client, n) => `${client}: ${n} ${n === 1 ? 'ordenador dado' : 'ordenadores dados'} de alta hoy`,
   enrolledBody: hosts => `Alta desde la línea de instalación: ${hosts.join(', ')}. Si no reconoces alguno, bórralo en el panel y genera una línea nueva.`,
   mailFooter: url => `${url ? `Panel: ${url}\n` : ''}Enviado por Vigía. Lo recibes porque tu dirección está en MAIL_TO.`,
+  clientTag: (k, p) => `[${k === 'resolved' ? 'Resuelto' : k === 'test' ? 'Prueba' : { P1: 'Urgente', P2: 'Importante', P3: 'Aviso' }[p]}${k === 'worse' ? ', ha empeorado' : k === 'after' ? ', sigue tras el mantenimiento' : ''}]`,
+  clientMailMany: (n, client) => `[Vigía] ${n} avisos para ${client}`,
+  clientMailBody: (items, { client, brand, url }) => `Hola:\n\nVigía, el sistema que vigila tus servicios${brand ? ` para ${brand}` : ''}, informa de lo siguiente:\n\n${items.map(i => `${es.clientTag(i.kind, i.prio)} ${i.title}${i.body ? `\n${i.body}` : ''}`).join('\n\n')}\n\n${items.every(i => i.kind === 'resolved' || i.kind === 'test') ? '' : 'Tu equipo de IT ya está avisado y se está ocupando.\n'}${url ? `Estado en tiempo real: ${url}\n` : ''}\n--\nMensaje automático. Lo recibes porque tu dirección está en la lista de avisos de ${client}.`,
+  clientMailFailed: client => `No se pudo enviar el email de avisos a ${client}`,
+  clientTestTitle: 'Prueba de avisos por email',
+  clientTestBody: 'Si lees esto, los avisos de Vigía llegarán a esta dirección.',
 };
 
 export const messages = lang => (String(lang).toLowerCase().startsWith('es') ? es : en);

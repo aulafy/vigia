@@ -15,6 +15,7 @@ import * as AI from './ai.mjs';
 import { messages } from './i18n.mjs';
 import { smtpSend, buildMessage, parseAddress, validEmail } from './smtp.mjs';
 import { renderReport, previousMonth, monthRange } from './report.mjs';
+import { renderPortal, portalKey, signPortal, verifyPortal, clientVisible, portalStrings, forClient } from './portal.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(DIR, 'data');
@@ -90,6 +91,13 @@ const PUSHED_F = process.env.VIGIA_PUSHED || path.join(DATA, 'pushed.json');
 let pushed = {}, pushedVer = 0;
 try { pushed = JSON.parse(fs.readFileSync(PUSHED_F, 'utf8')); } catch {}
 const savePushed = () => { pushedVer++; try { writeAtomic(PUSHED_F, JSON.stringify(pushed)); } catch (e) { log('cannot save pushed inventory:', e.message); saveErr = e.message; } };
+
+// Per-client settings: who at the client gets their alerts by e-mail, and their portal link (version and on/off).
+// A file of its own: it is configuration you edit from the dashboard, not runtime state.
+const CLIENTS_F = process.env.VIGIA_CLIENTS || path.join(DATA, 'clients.json');
+let clientCfg = Object.create(null);
+try { Object.assign(clientCfg, JSON.parse(fs.readFileSync(CLIENTS_F, 'utf8'))); } catch {}
+const PORTAL_KEY = portalKey(CHECKIN_SECRET || ACK_SECRET);
 
 // Edits to inventory.json apply without a restart: the file is re-read when it changes (or after a push).
 // A file that does not parse never empties the inventory: the last good copy stays in use and a P2 says so.
@@ -169,13 +177,18 @@ function channels(prio, title, body, ack) {
       chat_id: TELEGRAM_CHAT_ID, text: `${urgent ? '🚨' : '⚠️'} ${prio} ${title}\n${body}${ack ? `\n\n${T.ack}: ${ack}` : ''}`, link_preview_options: { is_disabled: true },
     })],
     WEBHOOK_URL && ['webhook', () => deliver('webhook', WEBHOOK_URL, { prio, title, body, key: ack ? new URL(ack).searchParams.get('key') : null, ackUrl: ack })],
-    EMAIL && ['email', () => L.retry(() => smtpSend({
-      host: SMTP_HOST, port: +SMTP_PORT, secure: SMTP_SECURE ? SMTP_SECURE === 'true' : undefined, allowPlain: SMTP_ALLOW_PLAIN === 'true', user: SMTP_USER, pass: SMTP_PASS, from: MAIL_FROM || SMTP_USER, to: MAIL_RCPT,
-      data: buildMessage({ from: MAIL_FROM || SMTP_USER || `vigia@${parseAddress(MAIL_RCPT[0]).email.split('@')[1]}`, to: MAIL_RCPT, subject: `${prio} ${title}`,
-        text: `${body}\n${ack ? `\n${T.ack}: ${ack}\n` : ''}\n--\n${T.mailFooter(PUBLIC_URL)}`, headers: urgent ? { 'X-Priority': '1', Importance: 'high' } : {} }),
-    }))],
+    EMAIL && ['email', () => sendMail(MAIL_RCPT, `${prio} ${title}`, `${body}\n${ack ? `\n${T.ack}: ${ack}\n` : ''}\n--\n${T.mailFooter(PUBLIC_URL)}`,
+      urgent ? { 'X-Priority': '1', Importance: 'high' } : {})],
   ].filter(Boolean);
 }
+// One e-mail through the configured SMTP server (alerts to you, and to clients who asked for theirs)
+const sendMail = (to, subject, text, headers = {}) => L.retry(() => smtpSend({
+  host: SMTP_HOST, port: +SMTP_PORT, secure: SMTP_SECURE ? SMTP_SECURE === 'true' : undefined, allowPlain: SMTP_ALLOW_PLAIN === 'true', user: SMTP_USER, pass: SMTP_PASS,
+  from: MAIL_SENDER, to, data: buildMessage({ from: MAIL_SENDER, to, subject, text, headers }),
+}));
+// Always your own address, never one made up from a recipient's domain (that would be spoofing their domain)
+const MAIL_SENDER = MAIL_FROM || SMTP_USER || (PUBLIC_URL ? `vigia@${new URL(PUBLIC_URL).hostname}` : null);
+if (SMTP_HOST && !MAIL_SENDER) console.error('Email: set MAIL_FROM (or SMTP_USER): there is no sender address');
 const channelCount = () => channels('P2', '', '').length;
 
 // Last resort when no channel works: tell the external heartbeat service, which alerts you by its own means
@@ -217,7 +230,7 @@ async function notify(prio, title, body, key) {
 // Maintenance windows mute notifications for the assets they cover (an "all" window also mutes Vigía's own alerts)
 const assetById = id => inv$.assets.find(a => a.id === id);
 const muted = assetId => (assetId ? inWindow(state.maintenance, assetById(assetId) || { id: assetId }) : (state.maintenance || []).some(w => w.all && Date.parse(w.from) <= Date.now() && Date.now() < Date.parse(w.to)));
-const alerts = createAlerts({ state, T, notify, applyAccept: L.applyAccept, save, isMuted: muted });
+const alerts = createAlerts({ state, T, notify, applyAccept: L.applyAccept, save, isMuted: muted, onEvent: (kind, a) => clientEvent(kind, a) });
 const { raise, resolve, send, onboard, histNote } = alerts;
 const ackAlert = key => alerts.ack(key);
 const monthOf = (t = Date.now()) => L.localClock(DIGEST_TZ, new Date(t)).day.slice(0, 7);
@@ -866,6 +879,117 @@ async function enroll(req) {
   }
   return [existing ? 200 : 201, { ok: true, asset: id, client, created: !existing, key: L.deriveKey(CHECKIN_SECRET, id) }];
 }
+// ---------- Client e-mails: each client's own alerts, to the people they chose ----------
+// New, worse, still-open-after-maintenance, and the resolution of what they were told about. Never the 10-minute repeats.
+// Batched per client (a burst is one e-mail), at most one e-mail per client every 5 minutes, and a problem that comes and goes
+// inside one batch is not sent at all. No acknowledge links: the portal link instead.
+const CLIENT_MAIL_MS = +(process.env.VIGIA_CLIENT_MAIL_MS || 60_000), CLIENT_MIN_GAP_MS = +(process.env.VIGIA_CLIENT_GAP_MS || 5 * 60_000), CLIENT_MAX_ITEMS = 20;
+const RANK = { P1: 0, P2: 1, P3: 2 };
+const clientQueue = new Map(); // client -> Map(alert key -> item)
+const plainBody = body => String(body || '').replace(T.acceptHint, '').trim();
+// Client names are free text: never let one reach Object.prototype ("__proto__", "constructor")
+const cfgOf = client => (Object.hasOwn(clientCfg, client) ? clientCfg[client] : null);
+const mailState = () => (state.clientMail && Object.getPrototypeOf(state.clientMail) === null ? state.clientMail : (state.clientMail = Object.assign(Object.create(null), state.clientMail)));
+function clientEvent(kind, a) {
+  if (!SMTP_HOST || !clientVisible(a)) return;
+  const client = assetById(a.asset)?.client, cfg = cfgOf(client);
+  if (!cfg?.emails?.length) return;
+  // a resolution is news only for a problem the client was told about
+  if (kind === 'resolved' ? !a.toClient : RANK[a.prio] > RANK[cfg.minPrio || 'P2']) return;
+  if (kind !== 'resolved') a.toClient = true;
+  let q = clientQueue.get(client);
+  if (!q) {
+    clientQueue.set(client, q = new Map());
+    const last = mailState()[client]?.at || 0;
+    setTimeout(() => flushClientMail(client).catch(e => log('client mail:', e.message)), Math.max(CLIENT_MAIL_MS, last + CLIENT_MIN_GAP_MS - Date.now())).unref();
+  }
+  const prev = q.get(a.key);
+  if (kind === 'resolved' && prev && prev.kind !== 'resolved') { q.delete(a.key); return; } // came and went within the batch
+  q.set(a.key, { kind, prio: a.prio, title: forClient(a.title, client), body: kind === 'resolved' ? '' : plainBody(a.body) });
+}
+const portalUrl = (client, base = PUBLIC_URL) => {
+  const p = cfgOf(client)?.portal;
+  return p?.on && PORTAL_KEY && base ? `${base.replace(/\/$/, '')}/portal/${signPortal(PORTAL_KEY, client, p.v)}` : null;
+};
+async function flushClientMail(client, items) {
+  if (!items) { items = [...(clientQueue.get(client)?.values() || [])]; clientQueue.delete(client); }
+  const cfg = cfgOf(client);
+  if (!items.length || !cfg?.emails?.length) return { ok: false, error: 'no recipients' };
+  items.sort((a, b) => RANK[a.prio] - RANK[b.prio]);
+  const shown = items.slice(0, CLIENT_MAX_ITEMS), one = items.length === 1 ? items[0] : null; // alert texts are in VIGIA_LANG, so the e-mail is too
+  const subject = one ? `${T.clientTag(one.kind, one.prio)} ${one.title}` : T.clientMailMany(items.length, client);
+  const text = T.clientMailBody(shown, { client, brand: REPORT_BRAND, url: portalUrl(client) }) + (items.length > shown.length ? `\n\n${T.more}` : '');
+  try {
+    await sendMail(cfg.emails, subject, text, items.some(i => i.prio === 'P1' && i.kind !== 'resolved') ? { 'X-Priority': '1', Importance: 'high' } : {});
+    mailState()[client] = { ok: true, at: Date.now() };
+    resolve(`clientmail:${client}`, '', { quiet: true });
+    return { ok: true };
+  } catch (e) {
+    mailState()[client] = { ok: false, at: Date.now(), err: e.message };
+    raise(`clientmail:${client}`, 'P2', T.clientMailFailed(client), e.message, null);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ---------- Client settings and portal links, from the dashboard ----------
+// Changes are written to disk first and only then kept in memory, so a full disk never leaves the two disagreeing
+function setClient(name, next) {
+  const all = Object.assign(Object.create(null), clientCfg);
+  all[name] = next;
+  writeAtomic(CLIENTS_F, `${JSON.stringify(all, null, 2)}\n`);
+  clientCfg = all;
+}
+async function editClient(req, u, base) {
+  const [, , , name, action] = u.pathname.split('/').map(decodeURIComponent);
+  if (!clientsOf(inventory({ includePaused: true })).includes(name)) return [404, { error: 'unknownClient' }];
+  let b = {};
+  try { b = JSON.parse((await readBody(req, 16 * 1024)) || '{}'); } catch { return [400, { error: 'badJson' }]; }
+  const cfg = { ...cfgOf(name) };
+  if (req.method === 'PUT' && !action) {
+    const emails = (Array.isArray(b.emails) ? b.emails : String(b.emails || '').split(/[,;\s]+/)).map(x => String(x).trim()).filter(Boolean);
+    const bad = emails.filter(x => !validEmail(x));
+    if (bad.length) return [422, { error: 'badEmail', values: bad }];
+    if (emails.length > 10) return [422, { error: 'tooMany', max: 10 }];
+    if (b.minPrio && !['P1', 'P2'].includes(b.minPrio)) return [422, { error: 'badPrio' }];
+    setClient(name, { ...cfg, emails, minPrio: b.minPrio || 'P2' });
+    return [200, { ok: true }];
+  }
+  if (req.method === 'POST' && action === 'portal') {
+    if (!PORTAL_KEY) return [503, { error: 'noSecret' }];
+    // a new link always retires the old one
+    setClient(name, { ...cfg, portal: b.action === 'revoke' ? { ...cfg.portal, on: false } : { v: (cfg.portal?.v || 0) + 1, on: true, at: new Date().toISOString() } });
+    return [200, { ok: true, url: portalUrl(name, base) }];
+  }
+  if (req.method === 'POST' && action === 'test') {
+    if (!SMTP_HOST) return [503, { error: 'noSmtp' }];
+    const r = await flushClientMail(name, [{ kind: 'test', prio: 'P3', title: T.clientTestTitle, body: T.clientTestBody }]);
+    return r.ok ? [200, { ok: true }] : [502, { error: r.error }];
+  }
+  return [405, { error: 'method' }];
+}
+
+// What the portal shows: this client's assets only, in the client's words
+function portalData(client, token) {
+  const month = monthOf(), assets = inventory({ includePaused: true }).filter(a => a.client === client), ids = new Set(assets.map(a => a.id));
+  const open = Object.values(state.alerts).filter(a => ids.has(a.asset) && clientVisible(a));
+  const count = f => open.filter(f).length;
+  return {
+    client, brand: REPORT_BRAND, generatedAt: Date.now(), timeZone: DIGEST_TZ,
+    alerts: open.map(a => ({ prio: a.prio, title: forClient(a.title, client), body: plainBody(a.body), first: a.first, ack: a.ack })),
+    sites: assets.filter(a => a.url || a.domain).map(a => {
+      const st = state.status[a.id] || {}, av = state.avail[a.id]?.[month];
+      return { name: a.name || a.id, host: (() => { try { return new URL(a.url).host; } catch { return a.domain; } })(), down: st.ok === false, paused: !!a.paused,
+        avail: av?.[0] ? `${(Math.floor(av[1] / av[0] * 10000) / 100).toFixed(2)} %` : null, tlsDays: st.tlsDays ?? null };
+    }),
+    computers: computersOf(assets, open),
+    devices: assets.flatMap(a => a.stack.filter(x => x.edge).map(x => ({ name: x.name, product: x.product, version: x.version,
+      alerts: count(y => y.dev === `${a.id}:${x.edgeIndex}` || y.key.startsWith(`adv:${a.id}:${x.edgeIndex}:`) || y.key.startsWith(`edge:`) && y.key.endsWith(`:${a.id}:${x.edgeIndex}`)) }))),
+    backups: jobsOf(assets).map(({ j, key }) => ({ job: `${assets.find(a => key.startsWith(`${a.id}/`))?.name || ''} · ${j.id}`, lastSuccess: state.backups[key]?.lastSuccess || null,
+      problems: count(x => x.key.startsWith('backup:') && x.key.endsWith(`:${key}`)) })),
+    reports: [[month, 'thisMonth'], [previousMonth(month), 'lastMonth']].map(([m, k]) => ({ month: m, k, href: `/portal/${token}/report?month=${m}` })),
+  };
+}
+
 // The agent scripts, served so the install line needs nothing but Vigía's address
 const AGENT_FILES = { 'install.sh': 'vigia-install.sh', 'vigia-collect.sh': 'vigia-collect.sh', 'vigia-agent.ps1': 'vigia-agent.ps1' };
 
@@ -1022,14 +1146,22 @@ const clientsOf = inv => [...new Set(inv.map(a => a.client).filter(Boolean))].so
 // "A&B" and "A B" would share a slug: a short hash keeps every client's file apart
 const slug = x => `${String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'client'}-${shortHash(x).slice(0, 6)}`;
 
-function reportData(client, month) {
+// Computers of a client as the report and the portal show them: antivirus null = Windows without an active one
+const computersOf = (assets, open) => assets.filter(a => a.machine).map(a => {
+  const p = pushed[a.id] || {}, m = p.machine || {}, active = (m.av || []).filter(x => x.enabled !== false && x.realTime !== false);
+  return { name: a.name || a.id, os: m.os, av: m.platform === 'windows' && !active.length ? null : active.map(x => x.name).join(', '),
+    lastPatch: m.patches?.lastInstalled || null, pushedAt: p.at || null, alerts: open.filter(x => x.asset === a.id && x.prio !== 'P3').length };
+});
+// forClient: the portal's copy, without Vigía's internal alerts and with titles in the client's terms
+function reportData(client, month, { forClient: mine = false } = {}) {
   monthRange(month); // validates
   const assets = inventory({ includePaused: true }).filter(a => a.client === client);
-  const ids = new Set(assets.map(a => a.id)), open = Object.values(state.alerts).filter(a => ids.has(a.asset));
+  const ids = new Set(assets.map(a => a.id)), seen = x => !mine || clientVisible(x), name = x => (mine ? { ...x, title: forClient(x.title, client) } : x);
+  const open = Object.values(state.alerts).filter(a => ids.has(a.asset) && seen(a)).map(name);
   const openFor = prefix => open.filter(x => x.key.startsWith(prefix));
   return {
     client, month, brand: REPORT_BRAND, generatedAt: Date.now(), timeZone: DIGEST_TZ, open,
-    history: state.history.filter(h => ids.has(h.asset)),
+    history: state.history.filter(h => ids.has(h.asset) && seen(h)).map(name),
     assets: assets.map(a => ({
       id: a.id, name: a.name || a.id, url: a.url, domain: a.domain, criticality: a.criticality, avail: state.avail[a.id]?.[month] || null,
       pushedAt: pushed[a.id]?.at || null,
@@ -1037,6 +1169,7 @@ function reportData(client, month) {
         alerts: [`adv:${a.id}:${x.edgeIndex}:`, `edge:mgmt:${a.id}:${x.edgeIndex}`, `edge:tls:${a.id}:${x.edgeIndex}`].reduce((n, p) => n + openFor(p).length, 0) })),
     })),
     backups: jobsOf(assets).map(({ key }) => ({ key, ...(state.backups[key] || {}), problems: openFor('backup:').filter(x => x.key.endsWith(`:${key}`)).map(x => x.prio) })),
+    computers: computersOf(assets, open),
     maintenance: (state.maintenance || []).filter(w => w.all || w.client === client || (w.assets || []).some(id => ids.has(id))),
   };
 }
@@ -1136,6 +1269,14 @@ every('health', 60_000, async () => {
     for (const k of Object.keys(state.coverage)) { const id = k.slice(k.indexOf(':') + 1); if (!k.startsWith('feed:') && !ids.has(id)) delete state.coverage[k]; }
     for (const k of Object.keys(state.replay)) { const id = k.slice(k.indexOf(':') + 1).split('/')[0]; if (!ids.has(id)) delete state.replay[k]; }
     for (const k of Object.keys(state.scanned)) if (!ids.has(k.slice(k.indexOf(':') + 1))) delete state.scanned[k];
+    // a client that no longer exists loses its portal link and recipients: a new client with the same name starts clean
+    const clientNames = new Set(clientsOf(inventory({ includePaused: true })));
+    const stale = Object.keys(clientCfg).filter(c => !clientNames.has(c));
+    if (stale.length) {
+      const all = Object.assign(Object.create(null), clientCfg);
+      for (const c of stale) delete all[c];
+      try { writeAtomic(CLIENTS_F, `${JSON.stringify(all, null, 2)}\n`); clientCfg = all; } catch (e) { log('clients.json:', e.message); }
+    }
     let gone = false;
     for (const id of Object.keys(pushed)) if (!ids.has(id)) { delete pushed[id]; gone = true; }
     if (gone) savePushed();
@@ -1219,13 +1360,14 @@ function authFailed(ip) {
 
 // Bad install-line tokens have their own counter: behind a proxy every request shares one address,
 // and a stranger guessing tokens must not lock you out of the dashboard
-const enrollFails = (() => {
+const makeLimiter = () => {
   const m = new Map();
   return {
     blocked: ip => { const f = m.get(ip); return f && f.n >= 10 && Date.now() - f.at < 600_000; },
     fail: ip => { const f = m.get(ip); m.set(ip, f && Date.now() - f.at < 600_000 ? { n: f.n + 1, at: f.at } : { n: 1, at: Date.now() }); if (m.size > 10_000) m.clear(); },
   };
-})();
+};
+const enrollFails = makeLimiter(), portalFails = makeLimiter(); // wrong portal links: same idea
 
 // Listening beyond this machine without a password exposes every client's inventory: refuse unless explicitly allowed
 const LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
@@ -1280,6 +1422,26 @@ http.createServer(async (req, res) => {
     try { const [code, out] = await enroll(req); if (code === 401) enrollFails.fail(ip); return json(out, code); }
     catch (e) { return json({ error: e.message }, 400); }
   }
+  // Client portal: read-only, opened with the client's signed link (no dashboard password). A revoked or unknown link is a plain 404.
+  if (req.method === 'GET' && u.pathname.startsWith('/portal/')) {
+    const [, , token, sub] = u.pathname.split('/'), t = verifyPortal(PORTAL_KEY, token), cfg = t && cfgOf(t.client);
+    if (!t || !cfg?.portal?.on || cfg.portal.v !== t.v || !clientsOf(inventory({ includePaused: true })).includes(t.client) || (sub && sub !== 'report')) {
+      // only wrong links count, and only they are blocked: a valid link keeps working behind a shared proxy address
+      if (portalFails.blocked(ip)) { res.writeHead(429, { 'retry-after': '600', ...NO_STORE }); return res.end('too many failed attempts'); }
+      portalFails.fail(ip);
+      return html('<!doctype html><meta name="viewport" content="width=device-width"><title>Vigía</title><body style="font:16px system-ui;padding:24px">Not found</body>', 404);
+    }
+    const lang = VIGIA_LANG; // the alert texts it shows are in that language
+    res.setHeader('x-robots-tag', 'noindex, nofollow');
+    if (sub === 'report') {
+      const month = u.searchParams.get('month') || monthOf();
+      if (!/^\d{4}-\d{2}$/.test(month)) return html('bad month', 400);
+      try { return html(renderReport(reportData(t.client, month, { forClient: true }), lang)); } catch (e) { return html(escHtml(e.message), 400); }
+    }
+    const d = portalData(t.client, token), PS = portalStrings(lang);
+    d.reports = d.reports.map(r => ({ label: `${PS[r.k]} · ${r.month}`, href: r.href }));
+    return html(renderPortal(d, lang));
+  }
   if (req.method === 'GET' && u.pathname.startsWith('/agent/') && AGENT_FILES[u.pathname.slice(7)]) {
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache', ...SECURITY_HEADERS });
     return res.end(fs.readFileSync(path.join(DIR, 'deploy', AGENT_FILES[u.pathname.slice(7)])));
@@ -1300,7 +1462,7 @@ http.createServer(async (req, res) => {
     inventory: inventory({ includePaused: true }).map(a => ({ ...a, stack: a.stack.filter(x => !x.edge).slice(0, 6), stackCount: a.stack.length,
       edge: a.stack.filter(x => x.edge).map(({ name, type, product, version, portal, management, edgeIndex }) => ({ name, type, product, version, portal, management, edgeIndex })),
       avail: state.avail[a.id]?.[monthOf()] || null })),
-    config: { ai: OLLAMA_MODEL ? { model: OLLAMA_MODEL, ...(state.aiStatus || { ok: null }) } : null, checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
+    config: { smtp: !!SMTP_HOST, portal: !!PORTAL_KEY, ai: OLLAMA_MODEL ? { model: OLLAMA_MODEL, ...(state.aiStatus || { ok: null }) } : null, checkin: !!CHECKIN_SECRET, checkinMasterAllowed: CHECKIN_ALLOW_MASTER === 'true', saveError: saveErr, wordfence: !!WORDFENCE_API_KEY, dashPass: !!DASH_PASS,
       canaryDays: +CANARY_DAYS, epss: [+EPSS_P1, +EPSS_P2], digestHour: +DIGEST_HOUR, timeZone: DIGEST_TZ, brand: REPORT_BRAND, inventoryError: inv$.broken },
     status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     maintenance: (state.maintenance || []).filter(w => Date.parse(w.to) > Date.now()),
@@ -1309,8 +1471,14 @@ http.createServer(async (req, res) => {
       ...(v.machine && { machine: { platform: v.machine.platform, os: v.machine.os, av: v.machine.av, patches: v.machine.patches, software: v.machine.software?.length ?? null,
         listening: (v.machine.listening || []).filter(p => p.network).slice(0, 60) } }) }])), backups: state.backups,
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, email: EMAIL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
+    clients: (() => { const base = enrollUrl(req), ok = SAFE_URL.test(base) ? base : null; return Object.fromEntries(clientsOf(inventory({ includePaused: true })).map(c => [c, {
+      emails: cfgOf(c)?.emails || [], minPrio: cfgOf(c)?.minPrio || 'P2', portal: portalUrl(c, ok), mail: mailState()[c] || null }])); })(),
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }
+  if (u.pathname.startsWith('/api/clients/') && req.method !== 'GET') {
+    try { const base = enrollUrl(req), [code, out] = await editClient(req, u, SAFE_URL.test(base) ? base : null); return json(out, code); }
+    catch (e) { log('client settings:', e.message); return json({ error: `could not save: ${e.message}` }, 500); }
+  }
   if (u.pathname === '/api/enroll-token' && req.method === 'POST') {
     if (!CHECKIN_SECRET) return json({ error: 'noCheckinSecret' }, 503);
     let b = {};

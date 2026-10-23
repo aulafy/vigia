@@ -1,7 +1,7 @@
 FROM node:22-alpine
 LABEL org.opencontainers.image.source=https://github.com/aulafy/vigia
 WORKDIR /app
-COPY package.json server.mjs lib.mjs alerts.mjs ai.mjs smtp.mjs i18n.mjs report.mjs inventory.example.json ./
+COPY package.json server.mjs lib.mjs alerts.mjs ai.mjs smtp.mjs i18n.mjs report.mjs portal.mjs inventory.example.json ./
 COPY deploy ./deploy
 COPY public ./public
 RUN mkdir -p data && chown node:node data

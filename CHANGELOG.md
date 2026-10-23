@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.13.0 — 2026-10-23
+
+### Added
+- **Client portal:** a read-only page per client behind a signed link from **Clients → a client → Client portal and notices**. It shows a plain-words status ("Everything is working" or "2 open issues, your IT team is on it") and their open issues (Urgent, Important, Notice), saying whether you are on it. It also lists their websites, computers, firewalls and backups, and their monthly reports. It shows nothing about other clients or Vigía's own alerts. There are no scripts and nothing is indexed, it refreshes every 5 minutes, and it works on phones and in dark mode. Links do not expire: **New link** retires the previous one and **Turn off** retires it. Ten wrong links from one address are blocked for 10 minutes.
+- **E-mails to the client:** addresses per client, urgent only or urgent and important. Clients hear about new, worse and resolved issues and what is still open after maintenance. They never get the 10-minute repeats, the digest or Vigía's own alerts, and get no acknowledge links (the portal link instead). Notices are batched for a minute per client, so a burst is one e-mail. **Send test** checks the addresses, and a failed delivery is a P2 for you. A new `onEvent` hook in the alert lifecycle (`alerts.mjs`) decides what a client hears.
+- Monthly report: a **Computers and servers** table (system, antivirus, last update, last report, open alerts).
+- `data/clients.json` (`VIGIA_CLIENTS`) holds per-client e-mails and portal link versions. API: `PUT /api/clients/<client>`, `POST /api/clients/<client>/portal`, `POST /api/clients/<client>/test`, `GET /portal/<token>`, `GET /portal/<token>/report`.
+- `npm run demo` has a portal link on for Clínica Dental Sol.
+
+### Security (from an independent review before release)
+- Client names never reach `Object.prototype`: settings are kept in prototype-less objects, and `__proto__`, `constructor` and `prototype` are refused as client names.
+- The portal's monthly report leaves out Vigía's internal alerts, like the portal page.
+- Only wrong portal links are rate-limited, so a stranger cannot lock clients out of a valid link behind a shared proxy address.
+- A client that leaves the inventory loses its link and recipients, so a new client with the same name does not inherit them.
+- Client e-mails: at most one every 5 minutes per client, problems that come and go within a batch are dropped, 20 items at most. Resolutions reach the client even when they are quiet for you. The sender is always `MAIL_FROM`/`SMTP_USER`, never derived from the client's domain.
+- Client settings are written to disk before they change in memory; a write error answers 500 instead of stopping Vigía.
+
 ## 0.12.0 — 2026-10-23
 
 ### Added

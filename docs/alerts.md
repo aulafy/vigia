@@ -57,6 +57,8 @@ MAIL_TO=you@example.com,colleague@example.com
 
 Each email has the priority in the subject (`P1 …`), is marked high importance for P1, and carries the acknowledge link when `PUBLIC_URL` and `ACK_SECRET` are set, plus a link to the dashboard. The certificate of the server is always verified. Nothing is sent without TLS except to `localhost` (`SMTP_ALLOW_PLAIN=true` allows it for a relay without a password), and invalid addresses in `MAIL_TO` are ignored with a warning at start-up.
 
+Clients can get their own notices by email too, without repeats and without acknowledge links: see [portal.md](portal.md#e-mails-to-the-client).
+
 Email is slow and easy to miss at night: use it as a second channel, or for the people who want the daily digest, not as the only way a P1 reaches you. **Settings → Channels** shows whether delivery works, and **Send test alert** tries every channel.
 
 ## Webhook: phone calls and escalation

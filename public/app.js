@@ -5,7 +5,7 @@ import { ed, openEditor, editorPage, onInput as editorInput, onAction as editorA
 
 const esc = M.esc;
 const root = document.getElementById('root');
-const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '', ai: {}, enroll: {} };
+const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '', ai: {}, enroll: {}, cs: {} };
 
 // per-viewer preferences only (theme, language); everything that matters lives on the server
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } return null; };
@@ -119,6 +119,30 @@ function machineRow(a, S) {
   const acts = `<span class="rowacts"><a class="btn small" href="#/editar/${encodeURIComponent(a.id)}">${esc(E.edit)}</a><button class="btn small" data-act="pause" data-key="${esc(a.id)}" data-v="${a.paused ? 0 : 1}">${esc(a.paused ? E.resume : E.pause)}</button></span>`;
   return `<div class="row"><span class="state ${a.paused ? 'off' : a.worst === 'P1' ? 'bad' : a.worst ? 'warn' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}</div>
     <div class="meta">${esc(meta)}</div>${ports}${top}</div><div class="side-r">${a.av === null ? `<span class="pill bad">${esc(M2.noAv)}</span>` : ''}${tags({ P1: a.alerts.filter(x => x.prio === 'P1').length, P2: a.alerts.filter(x => x.prio === 'P2').length, P3: a.alerts.filter(x => x.prio === 'P3').length }) || (m ? '<span class="pill ok">OK</span>' : '')}${acts}</div></div>`;
+}
+
+// Portal link and e-mail recipients for one client
+function clientShare(S, name) {
+  const t = T(), C = t.cp, cfg = S.clients?.[name] || { emails: [], minPrio: 'P2', lang: '' };
+  if (ui.cs.client !== name || (!ui.cs.dirty && !ui.cs.busy)) Object.assign(ui.cs, { client: name, emails: cfg.emails.join(', '), minPrio: cfg.minPrio, dirty: false, busy: false });
+  const f = ui.cs, opt = (v, l, cur) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(l)}</option>`;
+  const portal = !S.config?.portal ? `<div class="banner warn">${icon('alert')}${esc(C.noSecret)}</div>`
+    : cfg.portal ? `<pre class="cmd" id="portal-url">${esc(cfg.portal)}</pre><div class="rowacts"><button class="btn small" data-act="copy-portal">${icon('copy', 'sm')}${esc(t.mc.copy)}</button>
+      <a class="btn small" href="${esc(cfg.portal)}" target="_blank" rel="noopener noreferrer">${icon('ext', 'sm')}${esc(C.open)}</a>
+      <button class="btn small" data-act="portal" data-v="create" data-key="${esc(name)}">${esc(C.renew)}</button><button class="btn small" data-act="portal" data-v="revoke" data-key="${esc(name)}">${esc(C.revoke)}</button></div>`
+    : `<p class="mut small">${esc(C.off)}</p><button class="btn small" data-act="portal" data-v="create" data-key="${esc(name)}">${icon('plus', 'sm')}${esc(C.create)}</button>`;
+  const mail = cfg.mail ? `<p class="mut small">${esc(cfg.mail.ok ? C.lastOk : C.lastFail)} ${esc(ago(cfg.mail.at))}${cfg.mail.err ? `: ${esc(cfg.mail.err)}` : ''}</p>` : '';
+  return section(C.title, `<div class="list"><div class="row"><div class="main"><div class="title">${esc(C.portal)}</div><div class="meta">${esc(C.portalSub)}</div>${portal}</div></div>
+    <div class="row"><div class="main"><div class="title">${esc(C.emails)}</div>${!S.config?.smtp ? `<div class="banner warn">${icon('alert')}${esc(C.noSmtp)}</div>` : ''}
+      <form class="enroll" data-act="cs-form"><label class="fld" for="cs-emails"><span>${esc(C.addresses)}</span><input id="cs-emails" type="text" inputmode="email" value="${esc(f.emails)}" placeholder="it@cliente.es, gerencia@cliente.es"><small class="hint">${esc(C.emailsHint)}</small></label>
+      <label class="fld" for="cs-prio"><span>${esc(C.prio)}</span><select id="cs-prio">${opt('P1', C.p1, f.minPrio)}${opt('P2', C.p2, f.minPrio)}</select></label></form>
+      <div class="rowacts"><button class="btn small primary" data-act="cs-save" ${f.busy ? 'disabled' : ''}>${esc(C.save)}</button>${cfg.emails.length && S.config?.smtp ? `<button class="btn small" data-act="cs-test">${icon('mail', 'sm')}${esc(C.test)}</button>` : ''}</div>${mail}</div></div></div>`, 'mail');
+}
+async function clientCall(path, body) {
+  const r = await fetch(path, { method: path.endsWith('/portal') || path.endsWith('/test') ? 'POST' : 'PUT', headers: { 'x-vigia-ui': '1', 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(data.error || `HTTP ${r.status}`); e.data = data; throw e; }
+  return data;
 }
 
 // "Add computers": one install line per system, with a token for this client
@@ -274,6 +298,7 @@ function clientDetail(S, c) {
     + section(t.mc.title, list(machines.map(a => machineRow(a, S)), t.mc.none), 'pc')
     + (devices.length ? section(t.nav.equipos, list(devices.map(deviceRow), t.none), 'equipos') : '')
     + (backups.length ? section(t.nav.copias, list(backups.map(backupRow), t.none), 'copias') : '')
+    + clientShare(S, c.name)
     + maintenanceBlock(S, t, { client: c.name })
     + section(t.report, `<div style="display:flex;gap:8px;flex-wrap:wrap">${reportLinks(c.name, S)}</div>`, 'informes');
 }
@@ -333,6 +358,23 @@ root.addEventListener('click', async e => {
   if (act === 'mt-start' || act === 'mt-end') { e.preventDefault(); return onMaintenanceAction(act, b, ui.S, { t, toast, refresh }); }
   if (act === 'filter') { ui.filter[b.dataset.k] = b.dataset.v; return render(); }
   if (act === 'enroll-gen') { e.preventDefault(); return enrollGenerate(); }
+  if (act === 'copy-portal') { await copyText(ui.S?.clients?.[ui.cs.client]?.portal || '').then(() => toast(t.mc.copied), () => toast(t.mc.copied)); return; }
+  if (act === 'portal') {
+    b.disabled = true;
+    try { await clientCall(`/api/clients/${encodeURIComponent(b.dataset.key)}/portal`, { action: b.dataset.v }); toast(b.dataset.v === 'revoke' ? t.cp.revoked : t.cp.renewed); }
+    catch (err) { toast(err.message === 'noSecret' ? t.cp.noSecret : err.message); }
+    return refresh();
+  }
+  if (act === 'cs-save' || act === 'cs-test') {
+    const f = ui.cs, base = `/api/clients/${encodeURIComponent(f.client)}`;
+    f.busy = true; render();
+    try {
+      if (act === 'cs-save') { await clientCall(base, { emails: f.emails, minPrio: f.minPrio }); f.dirty = false; toast(t.cp.saved); }
+      else { await clientCall(`${base}/test`); toast(t.cp.testSent); }
+    } catch (err) { toast(err.message === 'badEmail' ? t.cp.badEmail.replace('{values}', (err.data.values || []).join(', ')) : err.message === 'noSmtp' ? t.cp.noSmtp : err.message); }
+    ui.cs.busy = false; ui.html = '';
+    return refresh();
+  }
   if (act === 'copy-cmd') { const k = b.dataset.k; await copyText(ui.enroll.data?.commands?.[k] || '').then(() => toast(t.mc.copied), () => toast(t.mc.copied)); return; }
   if (act === 'theme') { const v = b.dataset.v; pref('vigia-theme', v === 'auto' ? null : v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; return render(); }
   if (act === 'lang') { pref('vigia-lang', b.dataset.v === 'auto' ? null : b.dataset.v); return render(); }
@@ -349,10 +391,12 @@ root.addEventListener('keydown', e => {
 root.addEventListener('submit', e => e.preventDefault()); // the editor is a <form> only for semantics and Enter; saving goes through the API
 root.addEventListener('change', e => {
   if (e.target.dataset.act === 'client') { ui.filter.client = e.target.value; return render(); }
+  if (e.target.id === 'cs-prio') { ui.cs.minPrio = e.target.value; ui.cs.dirty = true; return; }
   if (editorInput(e.target) || onMaintenanceInput(e.target)) render();
 });
 root.addEventListener('input', e => {
   if (e.target.id === 'q') { ui.filter.q = e.target.value; return render(); }
+  if (['cs-emails', 'cs-prio'].includes(e.target.id)) { ui.cs[e.target.id === 'cs-emails' ? 'emails' : 'minPrio'] = e.target.value; ui.cs.dirty = true; return; }
   if (e.target.id === 'enroll-client') { Object.assign(ui.enroll, { client: e.target.value, typed: true, data: null, error: null }); return render(); }
   if (e.target.type !== 'checkbox' && e.target.tagName !== 'SELECT' && (editorInput(e.target) || onMaintenanceInput(e.target))) render();
 });

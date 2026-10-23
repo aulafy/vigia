@@ -53,3 +53,7 @@ test('maintenance windows: validation and who is covered', () => {
   assert.ok(inWindow(ws, { id: 'b', client: 'Other' }, now + 5.5 * 3600_000));
   assert.ok(inWindow([{ from: iso(-1), to: iso(1), all: true }], { id: 'x' }, now));
 });
+
+test('client names that would reach Object.prototype are refused', () => {
+  for (const client of ['__proto__', 'constructor', 'prototype']) assert.ok(validateAsset({ id: 'x', client, url: 'https://x.es' }).some(e => e.code === 'reserved'), client);
+});

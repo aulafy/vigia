@@ -12,8 +12,9 @@ export const ONBOARD_GRACE_MS = 3600_000;     // findings of an onboarding that 
 /**
  * notify(prio, title, body, key) → Promise<{ sent, failed, total }>
  * Every P1/P2 alert keeps `deliveredAt` until a channel confirmed it, so a crash or an outage never loses one silently.
+ * onEvent(kind, alert) hears what a client may hear about: 'new', 'worse', 'resolved' (also quiet ones), 'after' (maintenance), never repeats or retries.
  */
-export function createAlerts({ state, T, notify, applyAccept, now = () => Date.now(), save = () => {}, isMuted = () => false }) {
+export function createAlerts({ state, T, notify, applyAccept, now = () => Date.now(), save = () => {}, isMuted = () => false, onEvent = () => {} }) {
   state.alerts ||= {}; state.history ||= []; state.groups ||= {}; state.scanned ||= {};
   const queue = new AsyncLocalStorage();
   const onboarding = {}; // kind -> Set(assetId) while that kind's first scan runs
@@ -67,7 +68,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
   function escalate(a, prio, title) {
     Object.assign(a, { prio, ack: false, sentAt: now(), deliveredAt: null });
     histNote(a, { prio });
-    if (isMuted(a.asset)) a.muted = true; else send(prio, title, a.body, a.key);
+    if (isMuted(a.asset)) a.muted = true; else { send(prio, title, a.body, a.key); onEvent('worse', a); }
   }
 
   // raise: create (deduplicated by key) or update an alert. A worse priority re-pages: the old acknowledgement no longer covers it.
@@ -80,7 +81,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
       state.history.push({ key, prio, title, asset, first: t });
       if (isMuted(asset)) al.muted = true;        // maintenance window: kept, sent when the window ends if still open
       else if (inOnboarding(key, asset)) al.onb = t; // summarised by onboard(), not paged one by one
-      else send(prio, title, body, key);
+      else { send(prio, title, body, key); onEvent('new', al); }
       return al;
     }
     Object.assign(a, { title, body }, accept && { accept }, extra);
@@ -94,6 +95,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
     delete state.alerts[key];
     histNote(a, { resolvedAt: now() });
     if (!quiet && !a.muted && a.prio !== 'P3') send('P2', T.recovered(a.title), msg || ''); // nothing to recover from if it was never sent
+    if (!a.muted) onEvent('resolved', a); // even when quiet for you: a client who was told about it hears it is fixed
   }
 
   function ack(key) {
@@ -149,7 +151,7 @@ export function createAlerts({ state, T, notify, applyAccept, now = () => Date.n
       if (a.muted) {
         if (isMuted(a.asset)) continue;
         delete a.muted; // the window is over and the problem is still there: now it is news
-        if (!a.ack && a.prio !== 'P3') { a.sentAt = t; send(a.prio, T.afterMaintenance(a.title), a.body, a.key); }
+        if (!a.ack && a.prio !== 'P3') { a.sentAt = t; send(a.prio, T.afterMaintenance(a.title), a.body, a.key); onEvent('after', a); }
         continue;
       }
       if (a.ack || a.prio === 'P3') continue;

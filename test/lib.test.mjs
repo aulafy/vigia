@@ -573,3 +573,35 @@ test('enrolment tokens: client inside, expiring, tamper-proof; same computer, sa
   assert.deepEqual(L.enrollTarget(list, { client: 'Peluquería Ana', host: 'RECEPCION', machineId: 'bb'.repeat(32) }), { id: 'peluqueria-ana-recepcion-2', existing: false });
   assert.deepEqual(L.loadInventory([{ id: 'pc', client: 'A', machine: 'PC' }]).errors, []);
 });
+
+test('portal links: signed per client and version, tamper-proof; what a client may see', async () => {
+  const P = await import('../portal.mjs');
+  const key = P.portalKey('s'), tok = P.signPortal(key, 'Clínica Sol', 3);
+  assert.deepEqual(P.verifyPortal(key, tok), { client: 'Clínica Sol', v: 3 });
+  assert.equal(P.verifyPortal(P.portalKey('other'), tok), null);
+  const [c, , sig] = tok.split('.');
+  assert.equal(P.verifyPortal(key, `${c}.4.${sig}`), null, 'version bumped by hand');
+  assert.equal(P.verifyPortal(key, `${Buffer.from('ACME').toString('base64url')}.3.${sig}`), null, 'other client');
+  assert.equal(P.verifyPortal(key, '../../etc'), null);
+  assert.equal(P.verifyPortal(null, tok), null);
+  assert.ok(P.clientVisible({ key: 'down:shop', asset: 'shop' }));
+  for (const key of ['cover:osv:shop', 'enroll:x:2026-10-23', 'inv:stale:shop', 'canary:2026-10-23', 'channel:email']) assert.ok(!P.clientVisible({ key, asset: 'shop' }), key);
+  assert.ok(!P.clientVisible({ key: 'feed:kev', asset: null }));
+});
+
+test('portal page: escaped, read-only, no scripts, status in plain words', async () => {
+  const { renderPortal } = await import('../portal.mjs');
+  const d = { client: 'ACME <script>', brand: 'IT & Co', generatedAt: Date.parse('2026-10-23T10:00:00Z'), timeZone: 'Europe/Madrid',
+    alerts: [{ prio: 'P1', title: 'Shop is <b>DOWN</b>', body: 'HTTP 503', first: Date.now(), ack: true }],
+    sites: [{ name: 'Shop', host: 'shop.example', down: true, avail: '99.50 %', tlsDays: 40 }],
+    computers: [{ name: 'RECEPCION', os: 'Windows 11', av: null, pushedAt: Date.now(), alerts: 1 }], devices: [], backups: [],
+    reports: [{ label: 'este mes · 2026-10', href: '/portal/t/report?month=2026-10' }] };
+  const html = renderPortal(d, 'es');
+  assert.ok(!/<script/i.test(html), 'no scripts, escaped');
+  assert.match(html, /ACME &lt;script&gt;/);
+  assert.match(html, /1 incidencia abierta/);
+  assert.match(html, /IT se está ocupando/);
+  assert.match(html, /sin antivirus activo/);
+  assert.match(html, /noindex/);
+  assert.match(renderPortal({ ...d, alerts: [] }, 'en'), /Everything is working/);
+});

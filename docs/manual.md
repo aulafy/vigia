@@ -110,6 +110,10 @@ deploy/vigia-checkin.sh acme-shop db restore                                    
 
 Both scripts need only `sh`, `openssl` and `curl`. Details: [inventory-push.md](inventory-push.md), [backups.md](backups.md).
 
+### Client portal and client e-mails
+
+**Clients → the client → Client portal and notices**: **Create link** gives a read-only page for the client (their status, issues, computers, reports), and the e-mail field sends them their own notices. Details: [portal.md](portal.md).
+
 ### Computers (PCs, Macs, office servers)
 
 **Clients → the client → Add computers → Create install line**, then run the line on each computer: the terminal line on Linux and macOS (with `sudo`), the PowerShell line on Windows (as Administrator). Each computer appears under the client and reports daily: OS, antivirus, installed software, listening ports, last update. Vigía must be reachable from them (`PUBLIC_URL`, ideally HTTPS) and `CHECKIN_SECRET` must be set. Details: [computers.md](computers.md).

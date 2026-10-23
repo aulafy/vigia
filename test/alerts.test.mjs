@@ -161,3 +161,19 @@ test('maintenance: alerts are kept but not sent; still-open ones go out when the
   assert.ok(!sent.some(m => /RECOVERED cert/.test(m[1])));
   assert.equal(state.alerts['down:shop'].muted, undefined);
 });
+
+test('clients hear new, worse, resolved and after-maintenance; never repeats, retries or onboarding', async () => {
+  const events = [], clock = { t: Date.parse('2026-10-23T10:00:00Z') }, state = {}, mutedIds = new Set();
+  const A = createAlerts({ state, T: messages('en'), notify: async () => ({ sent: 1 }), applyAccept, now: () => clock.t,
+    isMuted: id => mutedIds.has(id), onEvent: (k, a) => events.push(`${k}:${a.key}:${a.prio}`) });
+  A.raise('down:x', 'P2', 'x down', '', 'x');
+  A.raise('down:x', 'P2', 'x down again', '', 'x');  // same priority: nothing new for the client
+  A.raise('down:x', 'P1', 'x down, worse', '', 'x');
+  clock.t += REPEAT_P1_MS + 1; A.sweep();            // the technician's repeat
+  A.resolve('down:x', 'back');
+  A.resolve('quiet:x', '', { quiet: true });
+  mutedIds.add('y'); A.raise('tls:y', 'P2', 'y cert', '', 'y');
+  mutedIds.delete('y'); A.sweep();
+  await A.onboard([{ id: 'z' }], 'osv', () => { A.raise('osv:z:1', 'P1', 'z vuln', '', 'z'); });
+  assert.deepEqual(events, ['new:down:x:P2', 'worse:down:x:P1', 'resolved:down:x:P1', 'after:tls:y:P2']);
+});

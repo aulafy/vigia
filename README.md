@@ -150,6 +150,10 @@ With [Ollama](https://ollama.com) and `OLLAMA_MODEL` set, every alert gets **Exp
 
 **Clients → a client → Add computers** gives you one line for Linux and macOS and one for Windows. Run it on each computer: it joins that client and reports every day what it runs, which antivirus is active, when it was last updated and which ports it listens on. The line expires, each computer gets its own key, and nothing is scanned. See **[docs/computers.md](docs/computers.md)**.
 
+## Client portal and client e-mails
+
+Give each client a **read-only link** to their own status page: open issues in plain words, websites, computers, firewalls, backups and monthly reports. Nothing about other clients, no account to create, and you can retire the link at any time. Clients can also get **their own notices by e-mail**: new, worse and resolved issues, batched, without the 10-minute repeats you get. See **[docs/portal.md](docs/portal.md)**.
+
 ## Monthly client reports
 
 One printable page per client and month: availability, incidents, response times, backups, edge devices and recommended actions. Open it from the dashboard, or let Vigía write all of them when the month ends. See **[docs/reports.md](docs/reports.md)**.
@@ -200,7 +204,7 @@ All settings are environment variables, which can live in `.env`:
 | `EDGE_VERSION_DAYS`, `ADVISORY_MAX_AGE_DAYS` | `60`, `45` | Ask to confirm a firmware version after this; ignore older advisories and posts |
 | `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8` | Resolvers for the DNS check. Public resolvers avoid stale local caches and split-horizon answers. |
-| `VIGIA_INV`, `VIGIA_STATE`, `VIGIA_PUSHED`, `VIGIA_WORDFENCE` | `data/…` | File locations |
+| `VIGIA_INV`, `VIGIA_STATE`, `VIGIA_PUSHED`, `VIGIA_WORDFENCE`, `VIGIA_CLIENTS` | `data/…` | File locations (`clients.json`: client e-mails and portal links) |
 
 ## HTTP endpoints
 
@@ -215,6 +219,8 @@ All settings are environment variables, which can live in `.env`:
 | `POST /api/enroll-token` | dashboard | Create an install line for a client: `{client}` → `{token, expires, commands: {unix, windows}}` |
 | `POST /api/enroll` | install-line token | A computer registers: `{token, host, machineId}` → `{asset, key}`. Ten bad tokens block the address for 10 minutes |
 | `GET /agent/install.sh`, `/agent/vigia-collect.sh`, `/agent/vigia-agent.ps1` | none | The agent scripts, so the install line needs only Vigía's address |
+| `PUT /api/clients/<client>`, `POST /api/clients/<client>/portal\|test` | dashboard | Client e-mail recipients, portal link (create, renew, turn off), test e-mail. See [docs/portal.md](docs/portal.md) |
+| `GET /portal/<token>`, `GET /portal/<token>/report?month=…` | portal link | The client's read-only status page and monthly reports |
 | `GET /api/reports` | dashboard | Clients and months available for reports |
 | `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
 | `GET /api/inventory`, `POST /api/assets`, `PUT/DELETE /api/assets/<id>`, `POST /api/assets/<id>/pause` | dashboard | Edit the inventory. Every write sends the revision it started from (`409` if the file changed meanwhile) and keeps a copy in `data/inventory-history/` |
@@ -245,7 +251,7 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `lib.mjs` holds the pure logic: matching, priorities, validation and signatures. It is unit tested.
 - `alerts.mjs` holds the alert lifecycle (raise, escalate, group, deliver, retry), with the transport injected and the lifecycle tested without a network.
 - `i18n.mjs` holds the alert texts in English and Spanish.
-- `report.mjs` renders the monthly client report (pure functions).
+- `report.mjs` renders the monthly client report, and `portal.mjs` the client portal and its signed links (pure functions).
 - `ai.mjs` builds the grounded prompts for the optional local AI (pure functions).
 - `smtp.mjs` is the email channel: a small SMTP client (TLS, STARTTLS, AUTH PLAIN/LOGIN), tested against a local fake server.
 - `deploy/` holds the agents: `vigia-install.sh` and `vigia-collect.sh` (Linux, macOS), `vigia-agent.ps1` (Windows), `vigia-checkin.sh` (backups).
@@ -260,7 +266,6 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 
 - New certificates in Certificate Transparency logs (as P3)
 - PrestaShop/Drupal module feeds
-- A read-only portal per client (their own alerts and report), and per-client email recipients
 - Optional URL reputation through Google Web Risk
 - More vendor PSIRT feeds (SonicWall, Ivanti and Citrix publish no usable RSS today; INCIBE-CERT covers them)
 - Monthly report delivery by email

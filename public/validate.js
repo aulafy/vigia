@@ -27,6 +27,7 @@ export function validateAsset(a, { ids = [], creating = false, edgeTypes = [] } 
   else if (creating && ids.includes(a.id)) add('id', 'duplicate');
   if (!String(a.client || '').trim()) add('client', 'required');
   if (a.client && String(a.client).length > 100) add('client', 'tooLong', { max: 100 });
+  if (['__proto__', 'constructor', 'prototype'].includes(String(a.client || '').trim())) add('client', 'reserved');
   if (a.name && String(a.name).length > 100) add('name', 'tooLong', { max: 100 });
 
   const edge = Array.isArray(a.edge) ? a.edge : [];

@@ -23,6 +23,8 @@ const inventory = [
     edge: [{ type: 'paloalto', name: 'PA-440', version: '11.1.2' }] },
 ];
 fs.writeFileSync(path.join(dir, 'inventory.json'), JSON.stringify(inventory, null, 2));
+// one client already has its portal link on (Clients → Clínica Dental Sol shows it)
+fs.writeFileSync(path.join(dir, 'clients.json'), JSON.stringify({ 'Clínica Dental Sol': { emails: ['gerencia@clinica-sol.example'], minPrio: 'P2', portal: { v: 1, on: true } } }));
 
 http.createServer((req, res) => {
   if (req.url === '/down') { res.writeHead(503); return res.end('maintenance'); }
@@ -32,7 +34,7 @@ http.createServer((req, res) => {
 
 Object.assign(process.env, {
   VIGIA_ENV_FILE: path.join(dir, 'none.env'), // the demo never uses your real .env (alert channels, secrets)
-  VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'),
+  VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'), VIGIA_CLIENTS: path.join(dir, 'clients.json'),
   VIGIA_WORDFENCE: path.join(dir, 'wordfence.json'), CHECKIN_SECRET: SECRET, CANARY_DAYS: '0', PORT: String(PORT),
   CONNECTIVITY_URLS: site('ok'), REPORT_BRAND: 'Demo IT Services', VIGIA_LANG: process.env.VIGIA_LANG || 'es',
 });
