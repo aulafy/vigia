@@ -20,7 +20,8 @@ const freePort = () => new Promise(r => { const s = http.createServer().listen(0
 
 function start(env, { waitFor = 'Vigía on' } = {}) {
   // never the developer's own .env: it may hold real alert channels
-  const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env: { PATH: process.env.PATH, VIGIA_ENV_FILE: path.join(dir, 'none.env'), ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // never the developer's own data/ either: every file a test does not name goes to a scratch folder
+  const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env: { PATH: process.env.PATH, VIGIA_ENV_FILE: path.join(dir, 'none.env'), VIGIA_DATA: path.join(dir, 'data'), ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const done = new Promise(res => {
     const on = d => { out += d; if (waitFor && out.includes(waitFor)) res({ p, out: () => out }); };
@@ -64,10 +65,15 @@ async function checkin(key, status, body = '', ts = Math.floor(Date.now() / 1000
 }
 const assetKey = crypto.createHmac('sha256', MASTER).update('vigia-asset:shop').digest('hex');
 
-test('refuses to listen beyond localhost without a password', async () => {
-  const r = await start({ PORT: String(await freePort()), HOST: '0.0.0.0', VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 's2.json') }, { waitFor: null });
+test('refuses to listen beyond localhost without a password, before touching any data file', async () => {
+  const data = path.join(dir, 'refused');
+  fs.mkdirSync(data);
+  fs.writeFileSync(path.join(data, 'pushed.json'), '{"pc":{"at":1}}');
+  const r = await start({ PORT: String(await freePort()), HOST: '0.0.0.0', VIGIA_DATA: data }, { waitFor: null });
   assert.equal(r.code, 1);
   assert.match(r.out(), /Refusing to listen/);
+  assert.deepEqual(fs.readdirSync(data), ['pushed.json'], 'nothing created');
+  assert.equal(fs.readFileSync(path.join(data, 'pushed.json'), 'utf8'), '{"pc":{"at":1}}', 'nothing changed');
 });
 
 test('dashboard: password, data never cached, static shell public', async () => {

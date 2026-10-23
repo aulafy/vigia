@@ -18,7 +18,7 @@ import { renderReport, previousMonth, monthRange } from './report.mjs';
 import { renderPortal, portalKey, signPortal, verifyPortal, clientVisible, portalStrings, forClient } from './portal.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
-const DATA = path.join(DIR, 'data');
+const DATA = process.env.VIGIA_DATA || path.join(DIR, 'data'); // every data file lives here unless its own VIGIA_* path says otherwise
 fs.mkdirSync(DATA, { recursive: true });
 
 // Minimal .env loader (real environment variables win; quotes are stripped).
@@ -57,6 +57,14 @@ if (process.argv[2] === 'key') {
   if (!CHECKIN_SECRET || !process.argv[3]) { console.error('usage: CHECKIN_SECRET=… node server.mjs key <asset-id>'); process.exit(2); }
   console.log(L.deriveKey(CHECKIN_SECRET, process.argv[3]));
   process.exit(0);
+}
+
+// Listening beyond this machine without a password exposes every client's inventory: refuse unless explicitly allowed.
+// Checked before anything is loaded or scheduled, so a refused start never touches the data files.
+const LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
+if (!LOCAL && !DASH_PASS && ALLOW_NO_PASSWORD !== 'true') {
+  console.error(`Refusing to listen on ${HOST} without DASH_PASS. Set DASH_PASS (recommended), or ALLOW_NO_PASSWORD=true if a proxy in front already authenticates.`);
+  process.exit(1);
 }
 
 if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'), INV);
@@ -1447,12 +1455,6 @@ const makeLimiter = () => {
 };
 const enrollFails = makeLimiter(), portalFails = makeLimiter(); // wrong portal links: same idea
 
-// Listening beyond this machine without a password exposes every client's inventory: refuse unless explicitly allowed
-const LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
-if (!LOCAL && !DASH_PASS && ALLOW_NO_PASSWORD !== 'true') {
-  console.error(`Refusing to listen on ${HOST} without DASH_PASS. Set DASH_PASS (recommended), or ALLOW_NO_PASSWORD=true if a proxy in front already authenticates.`);
-  process.exit(1);
-}
 const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 http.createServer(async (req, res) => {

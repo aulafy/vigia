@@ -45,7 +45,7 @@ Design rules that explain most decisions:
 | `public/` | Dashboard PWA: `app.js` (router, screens), `model.js` (view logic, tested), `editor.js`, `validate.js` (shared with the server), `sw.js` | `test/model.test.mjs`, `test/validate.test.mjs` |
 | `deploy/` | Agents and units: `vigia-install.sh`, `vigia-collect.sh`, `vigia-agent.ps1`, `vigia-checkin.sh`, `vigia.service`, `net.vigia.plist` | |
 
-### Files on disk (`data/`)
+### Files on disk (`data/`, or `VIGIA_DATA`)
 
 | File | Content | Written | Back it up? |
 |---|---|---|---|

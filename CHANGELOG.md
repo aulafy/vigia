@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.1 — 2026-10-23
+
+### Fixed
+- **Running the test suite could delete pushed inventories from your real `data/pushed.json`.** The test for "refuses to listen beyond localhost without a password" started a server that loaded and scheduled everything before refusing. Its first cleanup ran against the test inventory and wrote the real file, because the test did not redirect that one. A refused start now exits before any data file is read or written, and tests and the demo keep every file in a scratch folder (`VIGIA_DATA`). A push from each agent restores what was lost.
+- The demo wrote monthly reports into the real `data/reports/`.
+
+### Added
+- `VIGIA_DATA`: folder for every data file (default `data/`).
+
 ## 0.14.0 — 2026-10-23
 
 ### Added

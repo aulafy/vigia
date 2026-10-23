@@ -210,7 +210,8 @@ All settings are environment variables, which can live in `.env`:
 | `EDGE_VERSION_DAYS`, `ADVISORY_MAX_AGE_DAYS` | `60`, `45` | Ask to confirm a firmware version after this; ignore older advisories and posts |
 | `DASH_HOSTS` | — | Extra host names allowed to open the dashboard when `DASH_PASS` is not set |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8` | Resolvers for the DNS check. Public resolvers avoid stale local caches and split-horizon answers. |
-| `VIGIA_INV`, `VIGIA_STATE`, `VIGIA_PUSHED`, `VIGIA_WORDFENCE`, `VIGIA_CLIENTS` | `data/…` | File locations (`clients.json`: client e-mails and portal links) |
+| `VIGIA_DATA` | `data/` | Folder for every data file (tests and the demo point it to a scratch folder) |
+| `VIGIA_INV`, `VIGIA_STATE`, `VIGIA_PUSHED`, `VIGIA_WORDFENCE`, `VIGIA_CLIENTS` | `$VIGIA_DATA/…` | Individual file locations (`clients.json`: client e-mails and portal links) |
 
 ## HTTP endpoints
 
