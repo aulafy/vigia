@@ -40,7 +40,8 @@ fi
 URL=${1%/}; TOKEN=$2
 case $URL in
   https://*) ;;
-  http://localhost*|http://127.*|http://10.*|http://192.168.*|http://172.1[6-9].*|http://172.2[0-9].*|http://172.3[01].*) say "warning: plain HTTP on the local network, the key travels unencrypted" ;;
+  http://localhost:*|http://localhost|http://127.*|http://\[::1\]*) ;;   # this same machine: the key never leaves it
+  http://10.*|http://192.168.*|http://172.1[6-9].*|http://172.2[0-9].*|http://172.3[01].*) say "warning: plain HTTP: the key crosses your local network unencrypted" ;;
   # over the Internet, plain HTTP would let anyone on the way swap the agent this computer runs as root
   http://*) [ "${VIGIA_INSECURE:-}" = 1 ] || die "plain HTTP outside your local network: use an https:// address (or VIGIA_INSECURE=1 at your own risk)" ;;
   *) die "the address must start with https:// or http://" ;;

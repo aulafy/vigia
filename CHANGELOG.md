@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.2 — 2026-10-23
+
+### Fixed
+- The installers no longer warn about plain HTTP when Vigía is on the same machine (`localhost`, `127.x`, `::1`): the key never leaves it. On a private network, the warning now says the key crosses your local network unencrypted.
+
 ## 0.14.1 — 2026-10-23
 
 ### Fixed

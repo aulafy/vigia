@@ -250,12 +250,12 @@
         $url = ([string]$env:VIGIA_URL).TrimEnd('/')
         try { $uri = [Uri]$url } catch { throw "Invalid VIGIA_URL: $url" }
         if ($uri.Scheme -notin @('http', 'https') -or -not $uri.Host) { throw "Invalid VIGIA_URL: $url" }
-        if ($uri.Scheme -eq 'http') {
+        if ($uri.Scheme -eq 'http' -and -not $uri.IsLoopback) {   # this same machine: the key never leaves it
             $hostName = $uri.Host
             $privateHost = $hostName -eq 'localhost' -or $hostName -match '^127\.' -or $hostName -match '^10\.' -or $hostName -match '^192\.168\.' -or $hostName -match '^172\.(1[6-9]|2[0-9]|3[01])\.'
             # over the Internet, plain HTTP would let anyone on the way swap the script this computer runs as SYSTEM
             if (-not $privateHost -and $env:VIGIA_INSECURE -ne '1') { throw 'VIGIA_URL uses plain HTTP outside your local network: use an https:// address (or VIGIA_INSECURE=1 at your own risk)' }
-            Write-Warning 'VIGIA_URL uses HTTP; the key travels unencrypted'
+            Write-Warning 'VIGIA_URL uses plain HTTP: the key crosses your local network unencrypted'
         }
 
         # The task runs this folder's script as SYSTEM: a folder a normal user created beforehand (or a link) must not be trusted
