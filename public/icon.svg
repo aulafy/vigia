@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <!-- Four projections of the same A: a small monochrome "time axis". -->
-  <g fill="none" stroke-linecap="square" stroke-linejoin="bevel">
+  <!-- 64% centred fit: every painted point remains inside the standard 80% circular safe zone. -->
+  <g transform="translate(32 32) scale(.64) translate(-32 -32)" fill="none" stroke-linecap="square" stroke-linejoin="bevel">
     <g stroke="#000" stroke-width="6">
       <path d="M17 50 39 4 61 50M26 32h26"/>
       <path d="M14 52 36 6 58 52M23 34h26"/>

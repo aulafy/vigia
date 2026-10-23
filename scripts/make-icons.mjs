@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const black = [0, 0, 0], white = [255, 255, 255];
+const FIT = 0.64; // keeps every painted pixel inside the standard 80% circular safe zone
 
 // Four projections of an A in a 64-unit box. The rear three are white lines with black edges;
 // the front one reverses that relationship, making the mark readable on light and dark surfaces.
@@ -37,9 +38,10 @@ function render(size) {
     for (let sy = 0; sy < SS; sy++) for (let sx = 0; sx < SS; sx++) {
       const x = ((qx + (sx + 0.5) / SS) / size) * 64;
       const y = ((py + (sy + 0.5) / SS) / size) * 64;
+      const ax = 32 + (x - 32) / FIT, ay = 32 + (y - 32) / FIT;
       let color = null;
       for (const stroke of strokes) {
-        if (stroke.segments.some(([a, b]) => segDist(x, y, a, b) <= stroke.width / 2)) color = stroke.color;
+        if (stroke.segments.some(([a, b]) => segDist(ax, ay, a, b) <= stroke.width / 2)) color = stroke.color;
       }
       if (color) {
         acc[0] += color[0]; acc[1] += color[1]; acc[2] += color[2]; acc[3] += 255;
@@ -50,6 +52,12 @@ function render(size) {
     px[i + 1] = alpha ? acc[1] / (acc[3] / 255) : 0;
     px[i + 2] = alpha ? acc[2] / (acc[3] / 255) : 0;
     px[i + 3] = alpha;
+  }
+  // A maskable icon's guaranteed circular safe zone has a radius of 40% of the canvas.
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const alpha = px[(y * size + x) * 4 + 3];
+    if (alpha && Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) > size * 0.4)
+      throw new Error(`artwork leaves circular safe zone at ${x},${y}`);
   }
   return png(size, px);
 }
