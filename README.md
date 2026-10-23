@@ -23,6 +23,8 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
  RDAP + DNS + page content ── compared with a baseline ────▶       P3 → daily digest
 ```
 
+**Documentation:** [technician's quick manual](docs/manual.md) (get going in 15 minutes) · **[technical guide](docs/technical-guide.md)** (architecture, every check and priority, protocols and signatures, API, deployment, hardening, operations).
+
 ## What it checks
 
 | Every | Check | Alert |
@@ -41,6 +43,7 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
 | on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
 | daily | **Computers and servers** added with one install line (Windows, Linux, macOS): operating system, antivirus, installed software, ports the machine listens on, last update. Nothing is scanned: each computer reports on itself. | Windows without active antivirus: P2 · no updates for 90 days: P2 (45: P3) · risky service listening on the network (RDP, databases, VNC…): P3 · exploited program installed (KEV): as above |
+| 15 min | **Exposure to the Internet:** a TCP handshake to the computer's public address, only on the ports that computer reports listening on | Risky service reachable (RDP, SMB, databases, VNC…): P2, **P1** on high criticality · Docker API: **P1** · other ports: P3 |
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
 | 60 s | **Self-health:** stale feeds, checks that keep failing for one asset or feed (coverage), alert channels, disk, and an outgoing heartbeat to an external service | P2 (disk: P1), or the external service pages you |
 | daily | **Digest** of open P2s and new P3s | one message |
@@ -187,6 +190,9 @@ All settings are environment variables, which can live in `.env`:
 | `CANARY_DAYS`, `CANARY_ACK_HOURS` | `7`, `24` | Weekly test alert that must be acknowledged. `0` turns it off. |
 | `CHECKIN_SECRET` | — | Master secret for backup check-ins, inventory pushes and computer install lines. Servers never get it: they get per-asset keys (`node server.mjs key <asset>`) |
 | `ENROLL_DAYS` | `7` | How long an install line for computers stays valid |
+| `EXPOSURE_CHECK`, `EXPOSURE_HOURS` | `true`, `6` | Check from the Internet the ports computers listen on, and how often per address and port |
+| `PUBLIC_IP_URL` | `https://api.ipify.org` | Where Vigía looks up its own public address, to skip computers in its own network (`off` disables the lookup) |
+| `TRUST_PROXY` | `false` | Behind a reverse proxy: take the computer's address from `X-Forwarded-For` |
 | `WORDFENCE_API_KEY` | — | Free Wordfence Intelligence key, enables WordPress checks |
 | `WORDFENCE_HOURS`, `WORDFENCE_URL` | `6`, the v3 production feed | How often to refresh the feed, and from where (a mirror, for example) |
 | `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed, expiring acknowledge links in P1/P2 notifications |
@@ -236,7 +242,7 @@ Be honest with your clients about what is covered:
 - **Its AI is not an analyst.** The optional local model only explains and drafts, from Vigía's facts. Read what it writes before using it.
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
 - **PrestaShop, Joomla and Drupal modules** are not covered by a dedicated feed yet: only through OSV (Composer packages) and KEV. WordPress is covered through Wordfence.
-- **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers. Computers report on themselves through the agent you install: which ports *they* listen on, not what is reachable from the Internet.
+- **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers. Computers report on themselves through the agent you install. The only outbound probe is a TCP handshake to a computer's own public address, on the ports that computer reports listening on.
 - **It is not a SIEM, EDR or WAF.** Logs, file integrity, malware and intrusion detection belong to tools like Wazuh, CrowdSec or Cloudflare. Vigía complements them.
 - **It only knows about backups that report in.** It cannot see inside your backup tool. A job that never calls `vigia-checkin.sh` is invisible, and a "success" is only as honest as the script that sends it. Real restore tests remain your job: Vigía only reminds you.
 - **The content check reads the HTML the server sends.** Scripts injected later by JavaScript, for example through a tag manager, or code that only shows up for some visitors (cloaking), are invisible to it. It catches the common cases, but it is not a full malware scanner.
@@ -258,7 +264,7 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
 - `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 
-New to Vigía? Start with the **[technician's quick manual](docs/manual.md)**.
+New to Vigía? Start with the **[technician's quick manual](docs/manual.md)**. For how everything works underneath, read the **[technical guide](docs/technical-guide.md)**.
 
 Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
 

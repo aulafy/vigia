@@ -42,6 +42,7 @@ The agent looks only at **the computer it runs on**. It does not scan the networ
 | Risky services listening on the network: RDP, SMB (not on Windows, where it is always on), FTP, Telnet, VNC, databases (MySQL, PostgreSQL, SQL Server, MongoDB, Redis, Elasticsearch, memcached) | P3 |
 | The Docker API (2375) open on the network: anyone who reaches it is root | P2 |
 | A **new** service listening on the network since the first inventory (acknowledge to accept it) | P3 |
+| A port the computer listens on **answers from the Internet** at its public address (see below) | Risky service: P2 (P1 on high criticality) · Docker API: P1 · anything else: P3 |
 | Operating system at or near end of life (Windows 10, old macOS, old Linux releases…), from endoflife.date | as for any end-of-life software |
 | macOS behind the latest release of its version | P3 |
 | A program attackers go after (WinRAR, 7-Zip, AnyDesk, TeamViewer, ScreenConnect, Veeam, PaperCut, MOVEit, FortiClient, Acrobat, Java…) gets a new entry in **CISA KEV** | as for any KEV match. Browsers, Office and Zoom update themselves: P3 |
@@ -49,6 +50,22 @@ The agent looks only at **the computer it runs on**. It does not scan the networ
 | A computer was added today (one note per client and day) | P3 |
 
 "Listening on the network" is not the same as "reachable from the Internet": behind a router with NAT, it may not be. The alert says so. It is still worth knowing that the reception PC answers on RDP.
+
+## Exposure to the Internet
+
+"Listening on the network" does not say whether the Internet can reach it. So Vigía checks, from where it runs:
+
+1. **Which address.** The public address the inventory arrived from, when it is a public one. If Vigía is inside the same network or behind a proxy, the address the agent looked up (`--publicip`, from `VIGIA_IP_URL`, default `https://api.ipify.org`). Behind a reverse proxy, `TRUST_PROXY=true` makes Vigía use the first `X-Forwarded-For` address. Only global addresses are ever used: private, loopback, link-local, carrier-grade NAT, documentation and multicast ranges are refused, so a computer cannot point Vigía at an internal network.
+2. **Which ports.** Only the TCP ports **that computer reports listening on** beyond loopback, at most 50. Nothing else is tried.
+3. **How.** A plain TCP handshake from Vigía to `address:port`, closed at once: no banner grab, no payload. At most once per address and port every `EXPOSURE_HOURS` (6), 10 at a time.
+4. **Shared addresses.** Computers behind the same office router share one public address, and each pair of address and port is checked once. An open port means the router forwards it *somewhere*: the alert says the computer listening on it is the likely target.
+5. **Same network as Vigía.** From inside the network that is being checked, the router may answer for itself (hairpin NAT), so the answer means nothing. When the computer's public address is Vigía's own (looked up from `PUBLIC_IP_URL`), the check is skipped and the dashboard says so. Run Vigía outside the client's network (a small VPS) to get this check.
+
+6. **Limits.** At most 500 probes per round and 20,000 remembered results. A connection Vigía could not even attempt (no route from Vigía's own network) counts as unknown: it neither raises nor closes an alert. An address reported only by the agent waits until Vigía knows its own address, and a computer that reports more than 3 different addresses in a day is not checked. When several computers behind one address listen on the same port, the alert names the others: the forward reaches one of them.
+
+Behind a proxy, only the **last** `X-Forwarded-For` entry counts (the one your proxy appended), and only when the connection comes from a private address. A computer can only make Vigía attempt a handshake on its own listening ports at one address. It cannot prove that address is really its own, which is why such alerts say "reported by the computer itself". Dual-stack networks are checked on one address family (usually IPv4).
+
+Acknowledging an exposure alert accepts that port for that computer (a VPN port, a web server you publish on purpose). It does not come back unless you delete the computer. When a port stops answering, the alert closes with a *no longer answers from the Internet* message. `EXPOSURE_CHECK=false` turns the whole check off.
 
 ## Security
 

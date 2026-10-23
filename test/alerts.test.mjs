@@ -106,8 +106,9 @@ test('a P1 found during onboarding does not wait for the summary forever', async
 });
 
 test('onboarding findings nobody summarised are announced by the sweep', async () => {
-  const { A, state, sent, tick } = rig();
-  state.alerts['osv:Z:a:x'] = { key: 'osv:Z:a:x', prio: 'P2', title: 'orphan', body: '', asset: 'a', first: 0, sentAt: 0, ack: false, deliveredAt: null, onb: Date.now() - 2 * 3600_000 };
+  const { A, state, sent, tick, clock } = rig();
+  // the rig's own clock, not the wall clock: this test used to fail depending on the time of day
+  state.alerts['osv:Z:a:x'] = { key: 'osv:Z:a:x', prio: 'P2', title: 'orphan', body: '', asset: 'a', first: 0, sentAt: 0, ack: false, deliveredAt: null, onb: clock.t - 2 * 3600_000 };
   tick(0);
   await A.run('health', async () => A.sweep());
   assert.equal(sent.length, 1);

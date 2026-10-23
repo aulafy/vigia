@@ -605,3 +605,29 @@ test('portal page: escaped, read-only, no scripts, status in plain words', async
   assert.match(html, /noindex/);
   assert.match(renderPortal({ ...d, alerts: [] }, 'en'), /Everything is working/);
 });
+
+test('public addresses: only global ones, and the network wins over what the agent says', () => {
+  for (const ip of ['8.8.8.8', '81.2.3.4', '::ffff:81.2.3.4', '2a01:4f8::1']) assert.ok(L.isPublicIp(ip), ip);
+  for (const ip of ['10.1.2.3', '172.20.0.1', '192.168.1.1', '127.0.0.1', '100.64.0.1', '169.254.1.1', '203.0.113.9', '198.51.100.1', '224.0.0.1', '0.0.0.0', '::1', 'fe80::1', 'fd00::1', '2001:db8::1', '999.1.1.1', 'evil.com'])
+    assert.ok(!L.isPublicIp(ip), ip);
+  assert.deepEqual(L.pickPublicIp({ remote: '::ffff:81.2.3.4', reported: '8.8.8.8' }), { ip: '81.2.3.4', source: 'connection' });
+  assert.deepEqual(L.pickPublicIp({ remote: '192.168.1.20', reported: '8.8.8.8' }), { ip: '8.8.8.8', source: 'agent' });
+  assert.deepEqual(L.pickPublicIp({ forwarded: '81.2.3.4', remote: '127.0.0.1', reported: '8.8.8.8' }), { ip: '81.2.3.4', source: 'proxy' });
+  assert.equal(L.pickPublicIp({ remote: '10.0.0.1', reported: '192.168.1.1' }), null, 'never an internal address');
+  // only the entry your proxy appended, and only when the connection comes from the proxy
+  assert.equal(L.pickPublicIp({ forwarded: '6.6.6.6, 81.2.3.4', remote: '127.0.0.1' }).ip, '81.2.3.4');
+  assert.equal(L.pickPublicIp({ forwarded: '81.2.3.4', remote: '8.8.8.8' }).ip, '8.8.8.8');
+  // one spelling per address, hostnames never
+  assert.equal(L.normIp('::ffff:102:304'), '1.2.3.4');
+  assert.equal(L.normIp('2A01:4F8:0:0::1'), '2a01:4f8::1');
+  for (const x of ['2:', 'evil.com', '1.2.3', '1.2.3.4.5']) assert.equal(L.normIp(x), null, x);
+  assert.equal(L.parsePush({ parts: [{ kind: 'network', publicIp: ' 81.2.3.4 ' }] }).machine.reportedIp, '81.2.3.4');
+});
+
+test('exposure findings: only ports the computer listens on and Vigía reached; accepted ones stay quiet', () => {
+  const listening = L.normListening([{ addr: '0.0.0.0', port: 3389, process: 'svchost' }, { addr: '0.0.0.0', port: 8443 }, { addr: '0.0.0.0', port: 2375 }, { addr: '127.0.0.1', port: 5432 }, { addr: '0.0.0.0', port: 445 }]);
+  const results = { 3389: true, 8443: true, 2375: true, 5432: true, 445: false };
+  assert.deepEqual(L.exposureFindings(listening, results).map(f => `${f.service}:${f.prio}`), ['Docker API:P1', 'RDP:P2', 'tcp/8443:P3']);
+  assert.equal(L.exposureFindings(listening, results, { criticality: 'high' })[0].prio, 'P1');
+  assert.deepEqual(L.exposureFindings(listening, results, { accepted: ['tcp/8443', 'tcp/3389'] }).map(f => f.port), [2375]);
+});

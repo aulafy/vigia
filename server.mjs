@@ -38,7 +38,7 @@ const {
   ALLOW_NO_PASSWORD = 'false', ACK_LINK_DAYS = '7', EDGE_VERSION_DAYS = '60', ADVISORY_MAX_AGE_DAYS = '45',
   EPSS_P1 = '0.5', EPSS_P2 = '0.1', EPSS_URL = 'https://api.first.org/data/v1/epss', ADVISORY_FEED_URLS = '', REPORT_BRAND = '',
   OLLAMA_MODEL = '', OLLAMA_URL = 'http://127.0.0.1:11434', OLLAMA_TIMEOUT_S = '120',
-  SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE, SMTP_ALLOW_PLAIN, SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_TO = '', ENROLL_DAYS = '7',
+  SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE, SMTP_ALLOW_PLAIN, EXPOSURE_CHECK = 'true', EXPOSURE_HOURS = '6', TRUST_PROXY = 'false', PUBLIC_IP_URL = 'https://api.ipify.org', SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_TO = '', ENROLL_DAYS = '7',
   WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
@@ -63,7 +63,7 @@ if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'
 
 // domain / dns / web hold the baselines that change alerts compare against
 let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
-  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {}, maintenance: [], machines: {} };
+  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {}, maintenance: [], machines: {}, exposure: {} };
 if (fs.existsSync(STATE_F)) {
   try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; }
   catch (e) {
@@ -801,6 +801,12 @@ async function inventoryPush(req, u) {
   try { data = JSON.parse(body); } catch { return [400, { error: 'body must be JSON' }]; }
   const prev = pushed[assetId];
   const { stack, errors, total, truncated, machine } = L.parsePush(data);
+  // The public address to check from the Internet: what the network shows, else what the agent looked up
+  if (machine) {
+    const xff = TRUST_PROXY === 'true' ? req.headers['x-forwarded-for'] : null;
+    machine.publicIp = L.pickPublicIp({ forwarded: xff, remote: req.socket.remoteAddress, reported: machine.reportedIp })
+      || (process.env.VIGIA_EXPOSURE_ALLOW_PRIVATE === 'true' && machine.reportedIp ? { ip: machine.reportedIp, source: 'agent' } : null); // tests only
+  }
   if (!stack.length && !machine) return [400, { error: 'no components recognised', errors }];
   const first = !prev?.at;
   pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, errors, total, ...(machine && { machine }) };
@@ -810,7 +816,7 @@ async function inventoryPush(req, u) {
   else resolve(`inv:truncated:${assetId}`, '', { quiet: true });
   // A first push can bring hundreds of packages: treat it as onboarding, so it is summarised instead of paging per finding
   if (first) for (const k of ['osv', 'eol', 'wp']) delete state.scanned[`${k}:${assetId}`];
-  setTimeout(() => ['osv', 'wordpress', 'eol', 'inventory'].forEach(n => runners[n]?.()), 500);
+  setTimeout(() => ['osv', 'wordpress', 'eol', 'inventory', 'exposure'].forEach(n => runners[n]?.()), 500);
   const count = t => stack.filter(t).length;
   return [200, { ok: true, asset: assetId, components: stack.length, total, truncated,
     wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), software: machine?.software?.length || 0, errors }];
@@ -839,6 +845,75 @@ function checkMachines(inv) {
       raise(`mach:port:${a.id}:${p}`, 'P3', T.machPortNew(a, p), T.machPortNewBody(a, p, proc), a.id, { path: ['machines', a.id, 'ports'], add: p });
     }
     for (const al of Object.values(state.alerts)) if (al.key.startsWith(`mach:port:${a.id}:`) && !ports.includes(al.key.split(':').slice(3).join(':'))) resolve(al.key, '', { quiet: true });
+  }
+}
+
+// ---------- Exposure to the Internet (every 15 min, each address and port at most every EXPOSURE_HOURS) ----------
+// Vigía opens a TCP connection to the computer's public address, only on the ports that computer says it listens on beyond
+// loopback (at most 50), and closes it at once: no banner, no payload, nothing else is touched. An answer means something on that
+// address takes connections on that port from the Internet; behind NAT, that is a port forward on the router.
+// From inside the same network the answer means nothing (hairpin NAT), so a computer behind Vigía's own address is skipped.
+// true = it answered, false = refused or silently dropped (a firewall), null = Vigía's own network could not try (no route)
+const tcpOpen = (host, port, timeout = 4000) => new Promise(res => {
+  const s = net.connect({ host, port, timeout });
+  const done = ok => { s.destroy(); res(ok); };
+  s.once('connect', () => done(true)); s.once('timeout', () => done(false));
+  s.once('error', e => done(['ECONNREFUSED', 'ECONNRESET'].includes(e.code) ? false : null));
+});
+const MAX_PROBES = 500, MAX_EXPOSURE_RECORDS = 20_000, MAX_IPS_PER_DAY = 3;
+let ownIp = { ip: null, at: 0 };
+async function ownPublicIp() {
+  if (!PUBLIC_IP_URL || PUBLIC_IP_URL === 'off') return null;
+  if (Date.now() - ownIp.at < 6 * 3600_000) return ownIp.ip;
+  try {
+    const r = await fetch(PUBLIC_IP_URL, { headers: UA, signal: AbortSignal.timeout(8000) });
+    ownIp = { ip: L.normIp((await r.text()).trim()), at: Date.now() };
+  } catch { ownIp = { ip: null, at: Date.now() - 5.5 * 3600_000 }; } // try again in half an hour
+  return ownIp.ip;
+}
+async function checkExposure(inv) {
+  if (EXPOSURE_CHECK === 'false') return;
+  const own = await ownPublicIp(), lookupOn = PUBLIC_IP_URL && PUBLIC_IP_URL !== 'off';
+  const maxAge = +EXPOSURE_HOURS * 3600_000, jobs = new Map(), now = Date.now();
+  const targets = inv.map(a => ({ a, m: pushed[a.id]?.machine })).filter(x => x.m?.publicIp?.ip && x.m.listening);
+  const closeAll = (a, quiet = true) => { for (const al of Object.values(state.alerts)) if (al.key.startsWith(`expo:${a.id}:`)) resolve(al.key, '', { quiet }); };
+  for (const { a, m } of targets) {
+    const rec = state.machines[a.id] ||= {}, ip = m.publicIp.ip;
+    delete rec.expoSkip;
+    // the computer is in Vigía's own network: the router's answer means nothing (hairpin NAT)
+    if (own && ip === own) { rec.expoSkip = 'sameNetwork'; closeAll(a); continue; }
+    // an address only the agent vouches for waits until Vigía knows its own, so that guard is never skipped
+    if (m.publicIp.source === 'agent' && lookupOn && !own) { rec.expoSkip = 'unknownOwn'; continue; }
+    // a computer reporting a different address on every push is not followed around the Internet
+    rec.ips = (rec.ips || []).filter(x => now - x.at < 864e5 && x.ip !== ip).concat({ ip, at: now });
+    if (rec.ips.length > MAX_IPS_PER_DAY) { rec.expoSkip = 'tooManyAddresses'; continue; }
+    for (const p of m.listening.filter(x => x.network && x.proto === 'tcp').slice(0, 50)) {
+      const k = `${ip}|${p.port}`, r = state.exposure[k];
+      if (!r || r.open === null || now - r.at > maxAge) jobs.set(k, { ip, port: p.port });
+    }
+  }
+  await L.pool([...jobs.values()].slice(0, MAX_PROBES), 10, async j => { state.exposure[`${j.ip}|${j.port}`] = { open: await tcpOpen(j.ip, j.port), at: Date.now() }; });
+  const keys = Object.keys(state.exposure);
+  if (keys.length > MAX_EXPOSURE_RECORDS) for (const k of keys.sort((x, y) => state.exposure[x].at - state.exposure[y].at).slice(0, keys.length - MAX_EXPOSURE_RECORDS)) delete state.exposure[k];
+
+  // who else behind the same address listens on the same port: the forward reaches one of them, not necessarily this one
+  const sharing = {};
+  for (const { a, m } of targets) for (const p of m.listening.filter(x => x.network && x.proto === 'tcp')) (sharing[`${m.publicIp.ip}|${p.port}`] ||= []).push(a.name || a.id);
+  for (const { a, m } of targets) {
+    const rec = state.machines[a.id], ip = m.publicIp.ip, found = new Set();
+    if (rec.expoSkip) continue;
+    const results = Object.fromEntries(m.listening.map(p => [p.port, state.exposure[`${ip}|${p.port}`]?.open ?? null]));
+    for (const f of L.exposureFindings(m.listening, results, { criticality: a.criticality, accepted: rec.exposedOk || [] })) {
+      const k = `expo:${a.id}:${f.port}`, others = (sharing[`${ip}|${f.port}`] || []).filter(n => n !== (a.name || a.id));
+      found.add(k);
+      raise(k, f.prio, T.machExposed(a, f, ip), T.machExposedBody(a, f, ip, others, m.publicIp.source), a.id, { path: ['machines', a.id, 'exposedOk'], add: `tcp/${f.port}` });
+    }
+    // closed again: news only when Vigía saw it closed; unknown keeps the alert; not listening any more closes quietly
+    for (const al of Object.values(state.alerts)) if (al.key.startsWith(`expo:${a.id}:`) && !found.has(al.key)) {
+      const port = +al.key.split(':').pop(), listens = m.listening.some(p => p.port === port && p.network);
+      if (listens && results[port] === null) continue;
+      resolve(al.key, T.machExposedGone(ip, port), { quiet: !(listens && results[port] === false) });
+    }
   }
 }
 
@@ -1150,7 +1225,8 @@ const slug = x => `${String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\
 const computersOf = (assets, open) => assets.filter(a => a.machine).map(a => {
   const p = pushed[a.id] || {}, m = p.machine || {}, active = (m.av || []).filter(x => x.enabled !== false && x.realTime !== false);
   return { name: a.name || a.id, os: m.os, av: m.platform === 'windows' && !active.length ? null : active.map(x => x.name).join(', '),
-    lastPatch: m.patches?.lastInstalled || null, pushedAt: p.at || null, alerts: open.filter(x => x.asset === a.id && x.prio !== 'P3').length };
+    lastPatch: m.patches?.lastInstalled || null, pushedAt: p.at || null, alerts: open.filter(x => x.asset === a.id && x.prio !== 'P3').length,
+    exposed: open.filter(x => x.asset === a.id && x.key.startsWith('expo:')).map(x => { const port = +x.key.split(':').pop(); return L.RISKY_PORTS[port] || `tcp/${port}`; }) };
 });
 // forClient: the portal's copy, without Vigía's internal alerts and with titles in the client's terms
 function reportData(client, month, { forClient: mine = false } = {}) {
@@ -1238,6 +1314,7 @@ setTimeout(() => every('wordpress', 30 * 60_000, inv => onboard(inv, 'wp', () =>
 every('inventory', 15 * 60_000, async inv => { await checkInventoryAge(inv); checkMachines(inv); });
 setTimeout(() => every('edge', 15 * 60_000, inv => onboard(inv, 'adv', () => checkEdge(inv))), 35_000); // after KEV is loaded
 setTimeout(() => every('epss', 2 * 3600_000, checkEpss), 90_000); // after the first OSV / Wordfence / KEV results
+every('exposure', 15 * 60_000, checkExposure); // registered at once, so a push can trigger it
 
 // Watch the watcher: a feed that misses ~3 cycles is a blind spot
 const STALE = { uptime: 5 * 60_000, kev: 60 * 60_000, osv: 2 * 3600_000, eol: 24 * 3600_000, dns: 20 * 60_000, content: 60 * 60_000, domain: 24 * 3600_000, wordpress: 2 * 3600_000, edge: 60 * 60_000, epss: 6 * 3600_000 };
@@ -1282,6 +1359,7 @@ every('health', 60_000, async () => {
     if (gone) savePushed();
   }
   for (const [id, d] of Object.entries(state.osv)) if (now - (d.at || 0) > 30 * 864e5) delete state.osv[id];
+  for (const [k, r] of Object.entries(state.exposure || {})) if (now - r.at > 7 * 864e5) delete state.exposure[k];
   state.history = state.history.filter(h => !h.resolvedAt || now - h.resolvedAt < 400 * 864e5).slice(-20_000);
   const keepFrom = previousMonth(previousMonth(monthOf(now - 330 * 864e5)));
   for (const months of Object.values(state.avail)) for (const m of Object.keys(months)) if (m < keepFrom) delete months[m];
@@ -1469,7 +1547,8 @@ http.createServer(async (req, res) => {
     channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
     pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [],
       ...(v.machine && { machine: { platform: v.machine.platform, os: v.machine.os, av: v.machine.av, patches: v.machine.patches, software: v.machine.software?.length ?? null,
-        listening: (v.machine.listening || []).filter(p => p.network).slice(0, 60) } }) }])), backups: state.backups,
+        listening: (v.machine.listening || []).filter(p => p.network).slice(0, 60), publicIp: v.machine.publicIp?.ip || null, expoSkip: state.machines[k]?.expoSkip || null,
+        exposed: (v.machine.listening || []).filter(p => v.machine.publicIp && state.exposure[`${v.machine.publicIp.ip}|${p.port}`]?.open).map(p => p.port) } }) }])), backups: state.backups,
     notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, email: EMAIL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
     clients: (() => { const base = enrollUrl(req), ok = SAFE_URL.test(base) ? base : null; return Object.fromEntries(clientsOf(inventory({ includePaused: true })).map(c => [c, {
       emails: cfgOf(c)?.emails || [], minPrio: cfgOf(c)?.minPrio || 'P2', portal: portalUrl(c, ok), mail: mailState()[c] || null }])); })(),

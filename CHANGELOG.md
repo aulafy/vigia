@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.14.0 — 2026-10-23
+
+### Added
+- **Exposure to the Internet.** For every computer, Vigía now checks whether the ports it listens on answer from the Internet at its public address. Risky services (RDP, SMB, databases, VNC, Telnet, FTP…) are P2, or P1 on high criticality. The Docker API is P1 and other ports P3. Acknowledging accepts a port for that computer. When a port stops answering, the alert closes with a message.
+- **Which address:** the one the inventory came from, if it is public. Otherwise it is the one the agent looked up (`--publicip` in `vigia-collect.sh`, now part of `--all`, and the same in the Windows agent; `VIGIA_IP_URL`, `off` to skip). Behind a reverse proxy, `TRUST_PROXY=true` uses `X-Forwarded-For`. Only global addresses are accepted, never private, loopback, link-local, CGNAT, documentation or multicast ranges.
+- **How it probes:** a plain TCP handshake, only on the TCP ports that computer reports listening on beyond loopback (at most 50). Each address and port is tried at most every `EXPOSURE_HOURS` (6), 10 at a time. Computers behind Vigía's own public address are skipped, because from inside the same network the router's answer means nothing (hairpin NAT). The dashboard says so. `PUBLIC_IP_URL` and `EXPOSURE_CHECK=false` control this.
+- Dashboard and portal: public address and "open to the Internet" on each computer.
+- **[docs/technical-guide.md](docs/technical-guide.md):** a technical guide for IT staff covering architecture, every check and its priority, data sources, agents, protocols and signatures, alert lifecycle, API, deployment, hardening, operations and limits.
+
+### Security (from an independent review before release)
+- Addresses are parsed and stored in one canonical form (IPv4-mapped IPv6 included), and hostnames are refused.
+- With `TRUST_PROXY`, only the last `X-Forwarded-For` entry counts, and only when the connection comes from a private address.
+- Probing is bounded: 500 probes per round, 20,000 stored results. A computer reporting more than 3 addresses in a day is not checked. An address reported only by the agent waits until Vigía knows its own.
+- A probe Vigía could not attempt (no route) is "unknown": it neither raises nor closes an alert. When a computer turns out to share Vigía's network, its exposure alerts close.
+- When several computers behind one address listen on the same port, the alert names the others.
+
+### Fixed
+- A lifecycle test depended on the time of day (it mixed the wall clock with the simulated one).
+
 ## 0.13.0 — 2026-10-23
 
 ### Added

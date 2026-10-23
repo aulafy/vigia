@@ -163,6 +163,16 @@
             $parts.Add([ordered]@{ kind = 'patches'; lastInstalled = $lastInstalled; id = $hotfixId })
         } catch { Write-Warning "Patch inventory skipped: $($_.Exception.Message)" }
 
+        # Public address of this network (used by Vigía only when it cannot see it itself). VIGIA_IP_URL=off skips it.
+        $ipUrl = 'https://api.ipify.org'
+        if ($env:VIGIA_IP_URL) { $ipUrl = [string]$env:VIGIA_IP_URL }
+        if ($ipUrl -ne 'off') {
+            try {
+                $publicIp = ([string](Invoke-RestMethod -Uri $ipUrl -TimeoutSec 5 -UseBasicParsing)).Trim()
+                if ($publicIp -match '^[0-9A-Fa-f:.]{3,45}$') { $parts.Add([ordered]@{ kind = 'network'; publicIp = $publicIp }) }
+            } catch { Write-Warning "Public address lookup skipped: $($_.Exception.Message)" }
+        }
+
         $body = [ordered]@{
             host = [string]$env:COMPUTERNAME
             collectedAt = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')

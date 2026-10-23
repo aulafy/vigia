@@ -7,7 +7,7 @@ const P = {
     issues: n => `${n} open issue${n === 1 ? '' : 's'}`, issuesSub: 'Your IT team has been notified and is on it.',
     open: 'Open issues', since: 'since', handled: 'IT is on it', sites: 'Websites and services', up: 'working', down: 'down', paused: 'paused',
     avail: 'availability this month', cert: 'certificate', days: 'd', computers: 'Computers and servers', av: 'antivirus', noAv: 'no active antivirus',
-    lastPatch: 'last update', inventory: 'last report', never: 'never', devices: 'Firewalls, VPN and remote access', backups: 'Backups', lastOk: 'last good backup',
+    lastPatch: 'last update', inventory: 'last report', exposed: 'open to the Internet', never: 'never', devices: 'Firewalls, VPN and remote access', backups: 'Backups', lastOk: 'last good backup',
     ok: 'OK', problem: 'needs attention', reports: 'Monthly reports', thisMonth: 'This month', lastMonth: 'Last month', none: 'Nothing here yet.',
     prio: { P1: 'Urgent', P2: 'Important', P3: 'Notice' },
     foot: brand => `Read-only view. ${brand ? `Questions? Contact ${brand}.` : 'Questions? Contact your IT team.'} Monitored 24/7 with Vigía.`,
@@ -17,7 +17,7 @@ const P = {
     issues: n => `${n} incidencia${n === 1 ? '' : 's'} abierta${n === 1 ? '' : 's'}`, issuesSub: 'Tu equipo de IT ya está avisado y se está ocupando.',
     open: 'Incidencias abiertas', since: 'desde', handled: 'IT se está ocupando', sites: 'Webs y servicios', up: 'funciona', down: 'caída', paused: 'en pausa',
     avail: 'disponibilidad este mes', cert: 'certificado', days: 'd', computers: 'Ordenadores y servidores', av: 'antivirus', noAv: 'sin antivirus activo',
-    lastPatch: 'última actualización', inventory: 'último informe', never: 'nunca', devices: 'Firewalls, VPN y acceso remoto', backups: 'Copias de seguridad', lastOk: 'última copia correcta',
+    lastPatch: 'última actualización', inventory: 'último informe', exposed: 'abierto a Internet', never: 'nunca', devices: 'Firewalls, VPN y acceso remoto', backups: 'Copias de seguridad', lastOk: 'última copia correcta',
     ok: 'OK', problem: 'requiere atención', reports: 'Informes mensuales', thisMonth: 'Este mes', lastMonth: 'Mes pasado', none: 'Aún no hay nada aquí.',
     prio: { P1: 'Urgente', P2: 'Importante', P3: 'Aviso' },
     foot: brand => `Vista de solo lectura. ${brand ? `¿Dudas? Contacta con ${brand}.` : '¿Dudas? Contacta con tu equipo de IT.'} Vigilancia 24/7 con Vigía.`,
@@ -84,7 +84,8 @@ ${block(S.open, open.map(a => row(a.prio === 'P1' ? 'bad' : a.prio === 'P2' ? 'w
 ${block(S.sites, d.sites.map(s => row(s.paused ? 'off' : s.down ? 'bad' : '', esc(s.name), [esc(s.host), s.avail != null ? `${esc(s.avail)} ${esc(S.avail)}` : '', s.tlsDays != null ? `${esc(S.cert)} ${s.tlsDays} ${S.days}` : ''].filter(Boolean).join(' · '),
   pill(s.paused ? '' : s.down ? 'P1' : 'ok', s.paused ? S.paused : s.down ? S.down : S.up))))}
 ${block(S.computers, d.computers.map(c => row(c.alerts ? 'warn' : '', esc(c.name), [esc(c.os || ''), c.av === null ? esc(S.noAv) : c.av ? `${esc(S.av)}: ${esc(c.av)}` : '',
-  c.lastPatch ? `${esc(S.lastPatch)}: ${esc(date(c.lastPatch))}` : '', `${esc(S.inventory)}: ${esc(date(c.pushedAt))}`].filter(Boolean).join(' · '),
+  c.lastPatch ? `${esc(S.lastPatch)}: ${esc(date(c.lastPatch))}` : '', `${esc(S.inventory)}: ${esc(date(c.pushedAt))}`,
+  c.exposed?.length ? `<b>${esc(S.exposed)}: ${esc(c.exposed.join(', '))}</b>` : ''].filter(Boolean).join(' · '),
   pill(c.alerts ? 'P2' : 'ok', c.alerts ? S.problem : S.ok))))}
 ${block(S.devices, d.devices.map(x => row(x.alerts ? 'warn' : '', esc(x.name), [esc(x.product), esc(x.version || '')].filter(Boolean).join(' · '), pill(x.alerts ? 'P2' : 'ok', x.alerts ? S.problem : S.ok))))}
 ${block(S.backups, d.backups.map(b => row(b.problems ? 'bad' : '', esc(b.job), `${esc(S.lastOk)}: ${esc(date(b.lastSuccess))}`, pill(b.problems ? 'P1' : 'ok', b.problems ? S.problem : S.ok))))}

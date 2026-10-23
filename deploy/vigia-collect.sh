@@ -17,7 +17,9 @@
 #   --listening         TCP ports this machine listens on, from ss / netstat (Linux) or lsof (macOS). Nothing is scanned.
 #   --av                antivirus: ClamAV, Microsoft Defender (mdatp), CrowdStrike, SentinelOne, Sophos, ESET; XProtect on macOS
 #   --software          installed packages (dpkg / rpm / apk) or macOS applications, matched against exploited software
-#   --all               --os --runtimes --listening --av --software
+#   --publicip          this network's public address, from VIGIA_IP_URL (default https://api.ipify.org; "off" to skip).
+#                       Vigía uses it only when it cannot see the address itself, to check the listening ports from the Internet.
+#   --all               --os --runtimes --listening --av --software --publicip
 #   --dry-run           print the JSON instead of sending it
 #
 # Environment: VIGIA_URL, VIGIA_CHECKIN_SECRET (this asset's key: `node server.mjs key <asset-id>` on the Vigía host,
@@ -115,7 +117,7 @@ while [ $# -gt 0 ]; do
     --composer) file_part composer-lock "$2" lock; shift ;;
     --cyclonedx) file_part cyclonedx "$2" bom; shift ;;
     --spdx) file_part spdx "$2" doc; shift ;;
-    --all) shift; set -- --os --runtimes --listening --av --software "$@"; continue ;;
+    --all) shift; set -- --os --runtimes --listening --av --software --publicip "$@"; continue ;;
     --os)
       if [ "$OSNAME" = Darwin ]; then
         printf '{"kind":"os","id":"macos","version":"%s","name":"macOS %s"}' "$(sw_vers -productVersion)" "$(sw_vers -productVersion)" | add
@@ -125,6 +127,12 @@ while [ $# -gt 0 ]; do
     --listening) printf '{"kind":"listening","ports":[%s]}' "$(listening)" | add ;;
     --av) printf '{"kind":"av","products":[%s]}' "$(antivirus | joinl)" | add ;;
     --software) printf '{"kind":"software","items":[%s]}' "$(software)" | add ;;
+    --publicip)
+      U=${VIGIA_IP_URL:-https://api.ipify.org}
+      if [ "$U" != off ]; then
+        IP=$(curl -fsS --max-time 5 "$U" 2>/dev/null | tr -cd '0-9a-fA-F:.' | cut -c1-45 || true)
+        if [ -n "$IP" ]; then printf '{"kind":"network","publicIp":"%s"}' "$IP" | add; fi
+      fi ;;
     --runtimes)
       if has php; then runtime php "$(php -r 'echo PHP_VERSION;' 2>/dev/null)"; fi
       if has node; then runtime nodejs "$(node -v 2>/dev/null)"; fi

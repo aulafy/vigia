@@ -1,5 +1,6 @@
 // Pure logic: no I/O, so it can be unit tested (see test/lib.test.mjs).
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { suggestId, ID_RE } from './public/validate.js';
 
 const LEVELS = { alta: 'high', media: 'medium', baja: 'low' };
@@ -475,6 +476,7 @@ export function parsePush(body) {
           name: clip(p?.name || '?', 80), enabled: typeof p?.enabled === 'boolean' ? p.enabled : null, realTime: typeof p?.realTime === 'boolean' ? p.realTime : null,
           upToDate: typeof p?.upToDate === 'boolean' ? p.upToDate : null, signaturesAt: Date.parse(p?.signaturesAt) || null, version: p?.version ? clip(p.version, 40) : null })); break;
         case 'patches': machine.patches = { lastInstalled: Date.parse(part.lastInstalled) || null, id: part.id ? clip(part.id, 20) : null }; break;
+        case 'network': if (part.publicIp) machine.reportedIp = normIp(part.publicIp); break;
         case 'runtime': {
           const n = String(part.name || '').toLowerCase(), r = RUNTIME[n];
           if (r && part.version) stack.push({ product: r.product || n, eol: r.eol || n, version: String(part.version).replace(/^v/, ''), ...(r.kev && { kev: r.kev }) });
@@ -596,6 +598,48 @@ export function machineFindings(m, now = Date.now()) {
   if (risky.length) out.push({ kind: 'risky', prio: risky.some(p => NO_AUTH.has(p.port)) ? 'P2' : 'P3',
     services: risky.map(p => `${RISKY_PORTS[p.port]} (${p.proto}/${p.port}${p.process ? `, ${p.process}` : ''})`) });
   return out;
+}
+
+// ---------- Exposure to the Internet: only the ports the computer says it listens on, at its own public address ----------
+// One spelling per address, so two forms of the same address compare equal: "::ffff:1.2.3.4" and "::ffff:102:304" → "1.2.3.4",
+// "2A01:4F8:0:0::1" → "2a01:4f8::1". Anything that is not an IP (a hostname included) → null.
+export function normIp(ip) {
+  const s = String(ip || '').trim().replace(/^\[|\]$/g, '');
+  if (net.isIPv4(s)) return s;
+  if (!net.isIPv6(s)) return null;
+  const c = new URL(`http://[${s}]/`).hostname.slice(1, -1);
+  const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(c);
+  return m ? [parseInt(m[1], 16) >> 8, parseInt(m[1], 16) & 255, parseInt(m[2], 16) >> 8, parseInt(m[2], 16) & 255].join('.') : c;
+}
+// Only global addresses: never private, loopback, link-local, carrier-grade NAT, documentation, multicast or reserved ranges,
+// so a computer cannot point Vigía at someone's internal network
+export function isPublicIp(ip) {
+  const s = normIp(ip);
+  if (!s) return false;
+  if (s.includes(':')) return /^[23][0-9a-f]{0,3}:/.test(s) && !/^2001:0?db8:/.test(s) && !/^2002:/.test(s); // global unicast 2000::/3, not documentation or 6to4
+  const [a, b, c] = s.split('.').map(Number);
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168) || (a === 192 && b === 0 && (c === 0 || c === 2)) || (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
+}
+// Which address to check: the one the inventory came from, if it is public (nothing to trust but the network itself);
+// otherwise (Vigía inside the same network, or behind a proxy) the one the agent looked up
+// `forwarded` is the X-Forwarded-For header: only its last entry (the one your proxy appended) counts, and only when the
+// connection itself comes from a private address (the proxy); anything a client put further left is ignored
+export function pickPublicIp({ forwarded, remote, reported }) {
+  forwarded = forwarded && !isPublicIp(remote) ? String(forwarded).split(',').pop().trim() : null;
+  for (const [ip, source] of [[forwarded, 'proxy'], [remote, 'connection'], [reported, 'agent']]) if (isPublicIp(ip)) return { ip: normIp(ip), source };
+  return null;
+}
+/**
+ * exposureFindings(listening, results, { criticality, accepted }) → [{ port, service, process, prio }]
+ * results: { "<port>": true | false } from Vigía's own TCP handshake to the public address. Risky services open to the Internet:
+ * P2 (P1 on high criticality); the Docker API: P1; anything else: P3. Ports you accepted are left out.
+ */
+export function exposureFindings(listening, results, { criticality = 'medium', accepted = [] } = {}) { // results: true open, false closed, null unknown
+  return (listening || []).filter(p => p.network && p.proto === 'tcp' && results[p.port] === true && !accepted.includes(`tcp/${p.port}`)).map(p => ({
+    port: p.port, service: RISKY_PORTS[p.port] || `tcp/${p.port}`, process: p.process || null,
+    prio: NO_AUTH.has(p.port) ? 'P1' : RISKY_PORTS[p.port] ? (criticality === 'high' ? 'P1' : 'P2') : 'P3',
+  }));
 }
 
 // ---------- Enrolment: one line on a computer adds it to a client ----------

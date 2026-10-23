@@ -116,9 +116,10 @@ function machineRow(a, S) {
     m.patches?.lastInstalled ? `${M2.lastPatch}: ${ago(m.patches.lastInstalled)}` : '', `${t.inventory} ${ago(a.at)}`].filter(Boolean).join(' · ') : M2.waiting;
   const top = a.alerts.slice(0, 2).map(x => `<div class="body"><span class="tag ${x.prio}">${x.prio}</span> ${esc(x.title)}</div>`).join('');
   const ports = a.ports.length ? `<div class="meta">${esc(M2.ports)}: ${esc(a.ports.slice(0, 8).join(', '))}${a.ports.length > 8 ? ' …' : ''}</div>` : '';
+  const net = m?.publicIp ? `<div class="meta">${esc(M2.publicIp)}: ${esc(m.publicIp)}${m.expoSkip ? ` · ${esc(M2[m.expoSkip === 'sameNetwork' ? 'sameNet' : m.expoSkip] || '')}` : m.exposed?.length ? ` · <b>${esc(M2.exposed)}: ${esc(m.exposed.join(', '))}</b>` : ''}</div>` : '';
   const acts = `<span class="rowacts"><a class="btn small" href="#/editar/${encodeURIComponent(a.id)}">${esc(E.edit)}</a><button class="btn small" data-act="pause" data-key="${esc(a.id)}" data-v="${a.paused ? 0 : 1}">${esc(a.paused ? E.resume : E.pause)}</button></span>`;
   return `<div class="row"><span class="state ${a.paused ? 'off' : a.worst === 'P1' ? 'bad' : a.worst ? 'warn' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}</div>
-    <div class="meta">${esc(meta)}</div>${ports}${top}</div><div class="side-r">${a.av === null ? `<span class="pill bad">${esc(M2.noAv)}</span>` : ''}${tags({ P1: a.alerts.filter(x => x.prio === 'P1').length, P2: a.alerts.filter(x => x.prio === 'P2').length, P3: a.alerts.filter(x => x.prio === 'P3').length }) || (m ? '<span class="pill ok">OK</span>' : '')}${acts}</div></div>`;
+    <div class="meta">${esc(meta)}</div>${ports}${net}${top}</div><div class="side-r">${m?.exposed?.length && !m.expoSkip ? `<span class="pill bad">${icon('globe', 'sm')}${esc(M2.exposed)}</span>` : ''}${a.av === null ? `<span class="pill bad">${esc(M2.noAv)}</span>` : ''}${tags({ P1: a.alerts.filter(x => x.prio === 'P1').length, P2: a.alerts.filter(x => x.prio === 'P2').length, P3: a.alerts.filter(x => x.prio === 'P3').length }) || (m ? '<span class="pill ok">OK</span>' : '')}${acts}</div></div>`;
 }
 
 // Portal link and e-mail recipients for one client

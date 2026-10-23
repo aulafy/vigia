@@ -1,5 +1,7 @@
 # Vigía — technician's quick manual
 
+> Everything in depth (architecture, protocols, API, hardening): [technical guide](technical-guide.md).
+
 One page to get Vigía running, add clients, and know what to do when it pages you. Each section links to the full reference.
 
 **Contents:** [1. Set up](#1-set-up-15-minutes) · [2. Add a client](#2-add-a-client) · [3. Connect servers](#3-connect-servers-optional-recommended) · [4. When Vigía pages you](#4-when-vigía-pages-you) · [5. Routine](#5-routine) · [6. Troubleshooting](#6-troubleshooting) · [7. Cheat sheet](#7-cheat-sheet)
