@@ -1,0 +1,7 @@
+# HTTPS for Vigía: Caddy gets and renews a Let's Encrypt certificate for DOMAIN (from /opt/vigia/.env) on its own.
+{$DOMAIN} {
+	encode gzip
+	# Caddy replaces any X-Forwarded-For a client sends with the real address, so TRUST_PROXY is safe here
+	reverse_proxy vigia:4848
+	header Strict-Transport-Security "max-age=31536000"
+}

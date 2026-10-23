@@ -72,6 +72,9 @@ An alert tool that pages you for everything ends up ignored. Vigía is built to 
 Requires Node.js 20 or newer. There is nothing to install.
 
 ```bash
+# A small VPS with HTTPS, one command (Ubuntu/Debian, as root; point the domain's DNS to it first)
+curl -fsSL https://raw.githubusercontent.com/aulafy/vigia/main/deploy/vps/setup.sh | bash -s -- vigia.example.com
+
 # Docker (published image, amd64 and arm64)
 mkdir vigia && cd vigia
 curl -fsSLO https://raw.githubusercontent.com/aulafy/vigia/main/docker-compose.yml
@@ -261,7 +264,7 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `report.mjs` renders the monthly client report, and `portal.mjs` the client portal and its signed links (pure functions).
 - `ai.mjs` builds the grounded prompts for the optional local AI (pure functions).
 - `smtp.mjs` is the email channel: a small SMTP client (TLS, STARTTLS, AUTH PLAIN/LOGIN), tested against a local fake server.
-- `deploy/` holds the agents: `vigia-install.sh` and `vigia-collect.sh` (Linux, macOS), `vigia-agent.ps1` (Windows), `vigia-checkin.sh` (backups).
+- `deploy/` holds the agents: `vigia-install.sh` and `vigia-collect.sh` (Linux, macOS), `vigia-agent.ps1` (Windows), `vigia-checkin.sh` (backups); and `deploy/vps/` the one-command server kit (Vigía + Caddy with HTTPS, firewall, backups).
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
 - `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 

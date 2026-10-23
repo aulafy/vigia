@@ -15,7 +15,8 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --check server.mjs && node --check lib.mjs && node --check i18n.mjs && node --check report.mjs && node --check alerts.mjs && node --check ai.mjs && for f in public/*.js scripts/*.mjs; do node --check "$f"; done
       - run: npm test
-      - run: sh -n deploy/vigia-checkin.sh && sh -n deploy/vigia-collect.sh
+      - run: sh -n deploy/vigia-checkin.sh && sh -n deploy/vigia-collect.sh && sh -n deploy/vigia-install.sh && bash -n deploy/vps/setup.sh
+      - run: VIGIA_SETUP_DRY=1 VIGIA_DIR=$RUNNER_TEMP/vps bash deploy/vps/setup.sh vigia.example.com && test -s $RUNNER_TEMP/vps/.env && docker compose -f $RUNNER_TEMP/vps/docker-compose.yml --env-file $RUNNER_TEMP/vps/.env config -q
       - run: node -e "JSON.parse(require('fs').readFileSync('inventory.example.json','utf8'))"
   docker:
     runs-on: ubuntu-latest

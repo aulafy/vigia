@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.0 — 2026-10-23
+
+### Added
+- **One-command VPS kit** (`deploy/vps/`): `setup.sh <domain>` on a fresh Ubuntu/Debian server does the following:
+  - installs Docker and a firewall (SSH, 80, 443);
+  - writes `/opt/vigia` with Vigía behind Caddy (Let's Encrypt certificate, HSTS, `X-Forwarded-For` overwritten, so `TRUST_PROXY=true` is safe);
+  - generates every secret into `.env` (never overwritten on re-runs);
+  - installs a daily backup of `data/` and `.env`, kept 14 days;
+  - checks the DNS, waits for HTTPS, and prints the dashboard password and ntfy topic once.
+
+  Tested end to end with a local certificate. CI dry-runs it and validates the compose file.
+- [deployment.md](docs/deployment.md) leads with the VPS kit, and the README quick start and the technical guide include it.
+
 ## 0.14.2 — 2026-10-23
 
 ### Fixed

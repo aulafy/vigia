@@ -1,0 +1,34 @@
+# Vigía on a small VPS: the app, plus Caddy in front for automatic HTTPS (Let's Encrypt).
+# Installed by setup.sh into /opt/vigia. Only Caddy is published (80 and 443); Vigía is reachable only through it.
+services:
+  vigia:
+    image: ghcr.io/aulafy/vigia:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0          # inside the container network; Vigía refuses this without DASH_PASS
+      TRUST_PROXY: "true"    # Caddy overwrites X-Forwarded-For with the real client address
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4848/healthz"]
+      interval: 60s
+      timeout: 5s
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on: [vigia]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates: keep this volume, or Let's Encrypt rate limits may bite
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

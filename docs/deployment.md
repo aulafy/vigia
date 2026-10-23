@@ -9,6 +9,36 @@ Whatever you choose, configure `HEARTBEAT_URL` so that you hear about it when Vi
 
 **Resources.** Node.js 20 or newer. About 150 MB of RAM for a few hundred assets. With `WORDFENCE_API_KEY`, plan for **1 GB**: the Wordfence feed is about 120 MB and is parsed in memory every 6 hours. A few hundred MB of disk for `data/`.
 
+## Small VPS with HTTPS, one command (recommended for production)
+
+What most people need: Vigía on a small cloud server (1 vCPU, 1–2 GB RAM, Ubuntu 22.04+ or Debian 12+), reachable over HTTPS so that agents, your phone and your clients' portal links work.
+
+1. **Create the VPS** at any provider (Hetzner, OVH, Scaleway, DigitalOcean…), ideally not the one hosting your clients' sites. Note its IPv4 (and IPv6) address.
+2. **Point a domain to it:** a DNS `A` record (and `AAAA` for IPv6), for example `vigia.example.com`. Let it propagate (`dig +short vigia.example.com`).
+3. **Run the setup as root:**
+
+   ```bash
+   ssh root@vigia.example.com
+   curl -fsSL https://raw.githubusercontent.com/aulafy/vigia/main/deploy/vps/setup.sh | VIGIA_LANG=en bash -s -- vigia.example.com
+   ```
+
+The script ([deploy/vps/setup.sh](../deploy/vps/setup.sh)):
+
+| Step | Detail |
+|---|---|
+| Docker | Installed with the official script if missing |
+| Firewall | `ufw`: SSH, 80 and 443 only (`VIGIA_NO_FIREWALL=1` to skip) |
+| `/opt/vigia` | `docker-compose.yml` (Vigía + [Caddy](https://caddyserver.com)), `Caddyfile`, and an `.env` with fresh secrets: `DASH_PASS`, `CHECKIN_SECRET`, `ACK_SECRET`, a random `NTFY_TOPIC`, `PUBLIC_URL`. An existing `.env` is never overwritten, so running it again only updates and restarts |
+| HTTPS | Caddy obtains and renews a Let's Encrypt certificate, adds HSTS and overwrites `X-Forwarded-For` (so `TRUST_PROXY=true` is safe). Only Caddy publishes ports; Vigía is not reachable around it |
+| Backups | `/etc/cron.daily/vigia-backup`: `data/` and `.env` into `/opt/vigia/backups`, 14 days kept |
+| Checks | Warns if the DNS does not point to the server yet, waits for `https://<domain>/healthz`, and prints the dashboard password and the ntfy topic **once** |
+
+Then edit `/opt/vigia/.env` to add `HEARTBEAT_URL`, the SMTP settings and `REPORT_BRAND`, and apply it with `cd /opt/vigia && docker compose up -d`. Options: `VIGIA_LANG=es|en`, `VIGIA_DIR`, `VIGIA_SETUP_DRY=1` (write the files only).
+
+Tested end to end with a local certificate (`vigia.localhost`): dashboard 401 without password and 200 with it, agent scripts public, HSTS present, and a forged `X-Forwarded-For` from a client ignored.
+
+Running Vigía outside your clients' networks is also what makes the [Internet exposure check](computers.md#exposure-to-the-internet) meaningful.
+
 ## Docker Compose (recommended)
 
 The image is published on GHCR for amd64 and arm64: `ghcr.io/aulafy/vigia` (tags `latest`, `0.10`, `0.10.0`…). You only need two files:
@@ -69,6 +99,7 @@ Alternatives without opening ports: Tailscale (private network), Tailscale Funne
 ## Updating
 
 ```bash
+cd /opt/vigia && docker compose pull && docker compose up -d   # VPS kit
 docker compose pull && docker compose up -d   # Docker (published image)
 git pull && sudo systemctl restart vigia      # systemd
 ```

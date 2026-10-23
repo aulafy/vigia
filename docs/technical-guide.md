@@ -94,6 +94,14 @@ Before each uptime round, Vigía probes `CONNECTIVITY_URLS`. If none answers, Vi
 - Network out: HTTPS to the data sources, your sites, the alert channels and the SMTP server. For the exposure check, outbound TCP to your clients' public addresses.
 - Network in: only if agents, phones (acknowledge links) or clients (portal) must reach it. Put it behind HTTPS.
 
+### Small VPS, one command (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aulafy/vigia/main/deploy/vps/setup.sh | bash -s -- vigia.example.com
+```
+
+`deploy/vps/` installs Docker and `ufw` (22, 80, 443), and writes `/opt/vigia` with Vigía behind Caddy (Let's Encrypt, HSTS, `X-Forwarded-For` overwritten, so `TRUST_PROXY=true`). It generates every secret into `.env` (never overwritten on re-runs) and installs a daily backup of `data/` and `.env` (14 days). See [deployment.md](deployment.md#small-vps-with-https-one-command-recommended-for-production).
+
 ### Docker (published image)
 
 ```bash
