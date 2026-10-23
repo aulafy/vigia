@@ -40,6 +40,13 @@ export const STR = {
         tooLong: 'At most {max} characters', immutable: 'The ID cannot change', afterFrom: 'Must be after the start', maxDays: 'At most {max} days', past: 'Already over',
         oneScope: 'Choose one: everything, a client or assets', unknown: 'Unknown', notObject: 'Invalid' },
     },
+    mc: { title: 'Computers and servers', add: 'Add computers', addSub: 'One line on each computer: it joins this client and reports its inventory every day.',
+      client: 'Client', generate: 'Create install line', linux: 'Linux and macOS (terminal)', windows: 'Windows (PowerShell as Administrator)',
+      copy: 'Copy', copied: 'Copied', expires: 'The line works until {date}. Anyone with it can add computers to {client}.',
+      local: 'Vigía is on localhost here: the other computers cannot reach it. Set PUBLIC_URL to an address they can reach (VPN, tunnel or HTTPS).',
+      http: 'The address is plain HTTP: use it only on your own network, or put Vigía behind HTTPS.', noSecret: 'Set CHECKIN_SECRET on the Vigía server to add computers (openssl rand -hex 32).', badUrl: 'The address Vigía is reached at is not a plain URL. Set PUBLIC_URL (for example https://vigia.example.com).',
+      sends: 'It sends: operating system, antivirus, installed software and the ports the computer listens on. It scans nothing.',
+      noAv: 'no active antivirus', av: 'antivirus', sw: '{n} programs', ports: 'listening', lastPatch: 'last update', none: 'No computers yet.', waiting: 'waiting for the first inventory' },
     ai: { explain: 'Explain', client: 'Draft for the client', generating: 'Writing with {model} on this machine… (usually 10–40 s)', label: 'AI draft · {model} · check it before using it. Vigía sends nothing.',
       copy: 'Copy', copied: 'Copied', regen: 'Regenerate', close: 'Close', error: 'Could not write it: {err}', title: 'Local AI (Ollama)', on: 'On', off: 'Off',
       offHint: 'Set OLLAMA_MODEL in .env (for example qwen3.5:9b) to enable "Explain" and client drafts. Everything runs on this machine.', unavailable: 'Not available', modeExplain: 'Explanation', modeClient: 'Message for the client' },
@@ -88,6 +95,13 @@ export const STR = {
         tooLong: 'Como máximo {max} caracteres', immutable: 'El ID no se puede cambiar', afterFrom: 'Debe ser posterior al inicio', maxDays: 'Como máximo {max} días', past: 'Ya ha terminado',
         oneScope: 'Elige uno: todo, un cliente o activos', unknown: 'Desconocido', notObject: 'No válido' },
     },
+    mc: { title: 'Ordenadores y servidores', add: 'Añadir ordenadores', addSub: 'Una línea en cada ordenador: se da de alta en este cliente y envía su inventario cada día.',
+      client: 'Cliente', generate: 'Crear línea de instalación', linux: 'Linux y macOS (terminal)', windows: 'Windows (PowerShell como administrador)',
+      copy: 'Copiar', copied: 'Copiado', expires: 'La línea funciona hasta el {date}. Quien la tenga puede añadir ordenadores a {client}.',
+      local: 'Aquí Vigía está en localhost: los demás ordenadores no pueden llegar. Pon en PUBLIC_URL una dirección a la que lleguen (VPN, túnel o HTTPS).',
+      http: 'La dirección es HTTP sin cifrar: úsala solo en tu propia red, o pon Vigía detrás de HTTPS.', noSecret: 'Define CHECKIN_SECRET en el servidor de Vigía para añadir ordenadores (openssl rand -hex 32).', badUrl: 'La dirección con la que se llega a Vigía no es una URL sencilla. Define PUBLIC_URL (por ejemplo https://vigia.example.com).',
+      sends: 'Envía: sistema operativo, antivirus, programas instalados y los puertos en los que escucha el ordenador. No escanea nada.',
+      noAv: 'sin antivirus activo', av: 'antivirus', sw: '{n} programas', ports: 'escucha', lastPatch: 'última actualización', none: 'Aún no hay ordenadores.', waiting: 'esperando el primer inventario' },
     ai: { explain: 'Explícamelo', client: 'Borrador para el cliente', generating: 'Escribiendo con {model} en este equipo… (suele tardar 10–40 s)', label: 'Borrador IA · {model} · revísalo antes de usarlo. Vigía no envía nada.',
       copy: 'Copiar', copied: 'Copiado', regen: 'Regenerar', close: 'Cerrar', error: 'No se pudo escribir: {err}', title: 'IA local (Ollama)', on: 'Activada', off: 'Desactivada',
       offHint: 'Pon OLLAMA_MODEL en .env (por ejemplo qwen3.5:9b) para activar «Explícamelo» y los borradores. Todo se ejecuta en este equipo.', unavailable: 'No disponible', modeExplain: 'Explicación', modeClient: 'Mensaje para el cliente' },
@@ -191,7 +205,7 @@ export function backupsView(S) {
 const FEEDS = ['uptime', 'dns', 'content', 'kev', 'osv', 'wordpress', 'eol', 'domain', 'edge', 'epss'];
 export const feedsView = S => FEEDS.map(f => ({ name: f, at: S.feeds?.[f] || null, err: S.feeds?.[`${f}Err`] || null }));
 
-export const channelsView = S => Object.entries(S.notify || {}).filter(([k]) => ['ntfy', 'telegram', 'webhook'].includes(k))
+export const channelsView = S => Object.entries(S.notify || {}).filter(([k]) => ['ntfy', 'telegram', 'webhook', 'email'].includes(k))
   .map(([name, configured]) => ({ name, configured, ok: configured ? S.channels?.[name]?.ok !== false : null, err: S.channels?.[name]?.err || null }));
 
 export const navBadge = S => (S.alerts || []).filter(a => !a.ack && a.prio !== 'P3').length;
@@ -216,4 +230,16 @@ export function cleanDraft(a) {
   const clean = v => (Array.isArray(v) ? v.map(clean) : v && typeof v === 'object'
     ? Object.fromEntries(Object.entries(v).filter(([k, x]) => !k.startsWith('_') && x !== '' && x != null && x !== false && !(Array.isArray(x) && !x.length)).map(([k, x]) => [k, clean(x)])) : v);
   return clean(a);
+}
+
+// Computers and servers added with the install line (or declared with "machine"), with what their agent reported
+export function machinesView(S) {
+  const alerts = S.alerts || [];
+  return (S.inventory || []).filter(a => a.machine).map(a => {
+    const p = S.pushed?.[a.id] || {}, m = p.machine || null, mine = sortAlerts(alerts.filter(x => x.asset === a.id && !x.ack));
+    const av = m?.av || [], active = av.filter(x => x.enabled !== false && x.realTime !== false);
+    return { ...a, at: p.at || null, m, alerts: mine, worst: mine[0]?.prio || null,
+      av: m?.platform === 'windows' && !active.length ? null : active.map(x => x.name).join(', ') || '',
+      ports: (m?.listening || []).map(x => `${x.port}${x.process ? ` ${x.process}` : ''}`) };
+  }).sort((x, y) => (PRIO[x.worst] ?? 9) - (PRIO[y.worst] ?? 9) || String(x.name || x.id).localeCompare(String(y.name || y.id)));
 }

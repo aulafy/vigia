@@ -13,6 +13,7 @@ import { createAlerts } from './alerts.mjs';
 import { validateAsset, validateWindow, inWindow } from './public/validate.js';
 import * as AI from './ai.mjs';
 import { messages } from './i18n.mjs';
+import { smtpSend, buildMessage, parseAddress, validEmail } from './smtp.mjs';
 import { renderReport, previousMonth, monthRange } from './report.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,7 @@ const {
   ALLOW_NO_PASSWORD = 'false', ACK_LINK_DAYS = '7', EDGE_VERSION_DAYS = '60', ADVISORY_MAX_AGE_DAYS = '45',
   EPSS_P1 = '0.5', EPSS_P2 = '0.1', EPSS_URL = 'https://api.first.org/data/v1/epss', ADVISORY_FEED_URLS = '', REPORT_BRAND = '',
   OLLAMA_MODEL = '', OLLAMA_URL = 'http://127.0.0.1:11434', OLLAMA_TIMEOUT_S = '120',
+  SMTP_HOST, SMTP_PORT = '587', SMTP_SECURE, SMTP_ALLOW_PLAIN, SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_TO = '', ENROLL_DAYS = '7',
   WORDFENCE_API_KEY, WORDFENCE_HOURS = '6', WORDFENCE_URL = 'https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production',
 } = process.env;
 const INV = process.env.VIGIA_INV || path.join(DATA, 'inventory.json');
@@ -44,6 +46,9 @@ const T = messages(VIGIA_LANG);
 const VERSION = JSON.parse(fs.readFileSync(path.join(DIR, 'package.json'), 'utf8')).version;
 const UA = { 'user-agent': `vigia/${VERSION} (+https://github.com/aulafy/vigia)` };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const MAIL_ALL = MAIL_TO.split(',').map(x => x.trim()).filter(Boolean), MAIL_RCPT = MAIL_ALL.filter(validEmail);
+if (MAIL_RCPT.length < MAIL_ALL.length) console.error(`MAIL_TO: ignoring invalid address(es): ${MAIL_ALL.filter(x => !validEmail(x)).join(', ')}`);
+const EMAIL = !!(SMTP_HOST && MAIL_RCPT.length);
 const START = Date.now();
 
 // `node server.mjs key <asset-id>` prints the per-asset check-in key to install on that asset's servers
@@ -57,7 +62,7 @@ if (!fs.existsSync(INV)) fs.copyFileSync(path.join(DIR, 'inventory.example.json'
 
 // domain / dns / web hold the baselines that change alerts compare against
 let state = { alerts: {}, status: {}, kev: { seen: [], seeded: false }, osv: {}, feeds: {}, scanned: {}, domain: {}, dns: {}, web: {},
-  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {}, maintenance: [] };
+  channels: {}, chain: null, canary: {}, backups: {}, adv: {}, epss: {}, history: [], avail: {}, groups: {}, coverage: {}, replay: {}, edgeSeen: {}, maintenance: [], machines: {} };
 if (fs.existsSync(STATE_F)) {
   try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; }
   catch (e) {
@@ -164,6 +169,11 @@ function channels(prio, title, body, ack) {
       chat_id: TELEGRAM_CHAT_ID, text: `${urgent ? '🚨' : '⚠️'} ${prio} ${title}\n${body}${ack ? `\n\n${T.ack}: ${ack}` : ''}`, link_preview_options: { is_disabled: true },
     })],
     WEBHOOK_URL && ['webhook', () => deliver('webhook', WEBHOOK_URL, { prio, title, body, key: ack ? new URL(ack).searchParams.get('key') : null, ackUrl: ack })],
+    EMAIL && ['email', () => L.retry(() => smtpSend({
+      host: SMTP_HOST, port: +SMTP_PORT, secure: SMTP_SECURE ? SMTP_SECURE === 'true' : undefined, allowPlain: SMTP_ALLOW_PLAIN === 'true', user: SMTP_USER, pass: SMTP_PASS, from: MAIL_FROM || SMTP_USER, to: MAIL_RCPT,
+      data: buildMessage({ from: MAIL_FROM || SMTP_USER || `vigia@${parseAddress(MAIL_RCPT[0]).email.split('@')[1]}`, to: MAIL_RCPT, subject: `${prio} ${title}`,
+        text: `${body}\n${ack ? `\n${T.ack}: ${ack}\n` : ''}\n--\n${T.mailFooter(PUBLIC_URL)}`, headers: urgent ? { 'X-Priority': '1', Importance: 'high' } : {} }),
+    }))],
   ].filter(Boolean);
 }
 const channelCount = () => channels('P2', '', '').length;
@@ -266,7 +276,7 @@ async function checkKEV(inv) {
   const j = await getJSON('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json');
   kevSet = new Set(j.vulnerabilities.map(v => v.cveID));
   const seen = new Set(state.kev.seen), first = !state.kev.seeded, checked = state.kev.checked || {};
-  const hit = (v, a, s) => raise(`kev:${v.cveID}:${a.id}`, s.edge ? 'P1' : L.kevPriority(a.criticality), T.kev(v),
+  const hit = (v, a, s) => raise(`kev:${v.cveID}:${a.id}`, s.edge ? 'P1' : s.kevPrio || L.kevPriority(a.criticality), T.kev(v),
     `${T.kevBody(a, s, v)}${s.edge ? ` ${T.huntHint}` : ''}${(v.notes || '').match(/https?:\/\/[^\s;]+/)?.[0] ? ` ${(v.notes || '').match(/https?:\/\/[^\s;]+/)[0]}` : ''}`,
     a.id, null, { term: L.kevTerm(s), ...(s.edge && { dev: `${a.id}:${s.edgeIndex}` }) });
   // 1. entries added since the last run, against every asset
@@ -522,7 +532,12 @@ async function checkEOL(inv) {
     if (!(s.eol in cache)) cache[s.eol] = await getJSON(`https://endoflife.date/api/${encodeURIComponent(s.eol)}.json`).catch(e => { log('eol', s.eol, e.message); return null; });
     const cycles = cache[s.eol];
     if (!Array.isArray(cycles)) { complete = false; failures++; continue; }
-    const c = L.matchCycle(cycles, s.version), days = L.eolDays(c), p = L.eolPriority(days, a.criticality);
+    const c = s.cycles ? L.matchCycles(cycles, s.cycles) : L.matchCycle(cycles, s.version), days = L.eolDays(c), p = L.eolPriority(days, a.criticality);
+    // macOS: behind the latest release of its own cycle
+    if (s.behind && c?.latest) {
+      const k = `upd:${a.id}:${s.eol}`;
+      if (L.compareVersions(s.version, c.latest) < 0) { found.add(k); raise(k, 'P3', T.osBehind(a, s, c.latest), T.osBehindBody(a, s, c.latest), a.id); }
+    }
     if (!p) continue;
     const k = `eol:${a.id}:${s.eol}`;
     found.add(k);
@@ -530,7 +545,7 @@ async function checkEOL(inv) {
     else raise(k, p, T.eolSoon(a, s, days), a.name, a.id);
   }
   if (lookups && failures === lookups) throw new Error('every endoflife.date lookup failed');
-  if (complete) prune('eol', scanned, found, '');
+  if (complete) { prune('eol', scanned, found, ''); prune('upd', scanned, found, ''); }
 }
 
 const skips = (a, check) => (a.skip || []).includes(check);
@@ -772,10 +787,10 @@ async function inventoryPush(req, u) {
   let data;
   try { data = JSON.parse(body); } catch { return [400, { error: 'body must be JSON' }]; }
   const prev = pushed[assetId];
-  const { stack, errors, total, truncated } = L.parsePush(data);
-  if (!stack.length) return [400, { error: 'no components recognised', errors }];
+  const { stack, errors, total, truncated, machine } = L.parsePush(data);
+  if (!stack.length && !machine) return [400, { error: 'no components recognised', errors }];
   const first = !prev?.at;
-  pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, errors, total };
+  pushed[assetId] = { at: Date.now(), since: prev?.since, host: String(data.host || '').slice(0, 100), stack, errors, total, ...(machine && { machine }) };
   savePushed();
   // never cut silently: the components past the limit are not being checked
   if (truncated) raise(`inv:truncated:${assetId}`, 'P2', T.invTruncated(asset, total, L.MAX_PUSH), T.invTruncatedBody(asset), assetId);
@@ -785,8 +800,74 @@ async function inventoryPush(req, u) {
   setTimeout(() => ['osv', 'wordpress', 'eol', 'inventory'].forEach(n => runners[n]?.()), 500);
   const count = t => stack.filter(t).length;
   return [200, { ok: true, asset: assetId, components: stack.length, total, truncated,
-    wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), errors }];
+    wordpress: count(s => s.wp), packages: count(s => s.ecosystem), eol: count(s => s.eol), software: machine?.software?.length || 0, errors }];
 }
+
+// ---------- Computers and servers: antivirus, updates, services listening on the network (on each push and every 15 min) ----------
+const MACHINE_KINDS = { av: [T.machAv, T.machAvBody], avold: [T.machAvOld, T.machAvOldBody], patch: [T.machPatch, T.machPatchBody], risky: [T.machRisky, T.machRiskyBody] };
+function checkMachines(inv) {
+  for (const a of inv) {
+    const m = pushed[a.id]?.machine;
+    if (!m) continue;
+    const found = L.machineFindings(m);
+    // a push without a part (a collector run without --av, say) leaves that part's alerts as they are
+    const reported = { av: m.av, avold: m.av, patch: m.patches, risky: m.listening };
+    for (const [kind, [title, body]] of Object.entries(MACHINE_KINDS)) {
+      if (!reported[kind]) continue;
+      const f = found.find(x => x.kind === kind), k = `mach:${kind}:${a.id}`;
+      if (f) raise(k, f.prio, title(a, f), body(a, f), a.id); else resolve(k, '', { quiet: kind !== 'av' });
+    }
+    // New listening services against the first inventory (acknowledging accepts them); one that closes again closes its alert
+    const ports = L.networkPorts(m.listening), base = state.machines[a.id] ||= {};
+    if (!m.listening) continue;
+    if (!base.ports) { base.ports = ports; continue; }
+    for (const p of ports) if (!base.ports.includes(p)) {
+      const proc = m.listening.find(x => `${x.proto}/${x.port}` === p)?.process;
+      raise(`mach:port:${a.id}:${p}`, 'P3', T.machPortNew(a, p), T.machPortNewBody(a, p, proc), a.id, { path: ['machines', a.id, 'ports'], add: p });
+    }
+    for (const al of Object.values(state.alerts)) if (al.key.startsWith(`mach:port:${a.id}:`) && !ports.includes(al.key.split(':').slice(3).join(':'))) resolve(al.key, '', { quiet: true });
+  }
+}
+
+// ---------- Enrolment: the install line adds a computer to a client ----------
+// POST /api/enroll { token, host, machineId, platform } → { asset, key }. The token (from the dashboard) names the client and expires.
+// The address goes into a shell and a PowerShell command: only plain URL characters, never quotes or spaces
+const SAFE_URL = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?(?:\/[a-z0-9._~\/-]*)?$|^https?:\/\/\[[0-9a-f:.]+\](?::\d{1,5})?$/i;
+const enrollUrl = req => (PUBLIC_URL || `${req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'}://${req.headers.host}`).replace(/\/$/, '');
+function enrollToken(req, client) {
+  const exp = Math.floor(Date.now() / 1000) + Math.round(+ENROLL_DAYS * 86400), token = L.signEnroll(CHECKIN_SECRET, client, exp), url = enrollUrl(req);
+  if (!SAFE_URL.test(url)) return null;
+  return { client, token, expires: exp * 1000, url, local: /^https?:\/\/(localhost|127\.|\[::1\])/.test(url), https: url.startsWith('https://'),
+    commands: {
+      unix: `curl -fsSL ${url}/agent/install.sh | sudo sh -s -- ${url} ${token}`,
+      windows: `$env:VIGIA_URL='${url}'; $env:VIGIA_TOKEN='${token}'; irm ${url}/agent/vigia-agent.ps1 | iex`,
+    } };
+}
+async function enroll(req) {
+  let b;
+  try { b = JSON.parse(await readBody(req, 8 * 1024)); } catch { return [400, { error: 'body must be JSON' }]; }
+  const client = L.verifyEnroll(CHECKIN_SECRET, b?.token);
+  if (!client) return [401, { error: 'invalid or expired install line: generate a new one in the dashboard' }];
+  const host = String(b.host || '').replace(/[^\p{L}\p{N}._-]/gu, '').slice(0, 63), machineId = String(b.machineId || '').toLowerCase();
+  if (!host || !/^[0-9a-f]{16,128}$/.test(machineId)) return [400, { error: 'host and machineId (hex) are required' }];
+  let file;
+  try { file = readInventoryFile(); } catch (e) { return [409, { error: `inventory.json is broken: ${e.message}` }]; }
+  const { id, existing } = L.enrollTarget(file.list, { client, host, machineId });
+  if (!existing) {
+    const asset = { id, client, name: host, machine: host, machineId, criticality: 'medium', inventoryMaxAgeHours: 72, enrolledAt: new Date().toISOString().slice(0, 10) };
+    const errors = validateAsset(asset, { ids: file.list.map(a => a.id), creating: true });
+    if (errors.length) return [422, { error: 'invalid', errors }];
+    writeInventoryFile([...file.list, asset]);
+    // one note per client and day, so a new computer nobody expected is seen
+    const k = `enroll:${slug(client)}:${L.localClock(DIGEST_TZ).day}`, hosts = [...(state.alerts[k]?.hosts || []), host];
+    raise(k, 'P3', T.enrolled(client, hosts.length), T.enrolledBody(hosts), id, null, { hosts });
+    log(`enrolled ${id} (${client}) from ${req.socket.remoteAddress}`);
+    save();
+  }
+  return [existing ? 200 : 201, { ok: true, asset: id, client, created: !existing, key: L.deriveKey(CHECKIN_SECRET, id) }];
+}
+// The agent scripts, served so the install line needs nothing but Vigía's address
+const AGENT_FILES = { 'install.sh': 'vigia-install.sh', 'vigia-collect.sh': 'vigia-collect.sh', 'vigia-agent.ps1': 'vigia-agent.ps1' };
 
 // ---------- Inventory editing from the dashboard ----------
 // Every write checks the revision the editor started from (a hand edit in between is never overwritten),
@@ -821,11 +902,11 @@ function tidy(a, depth = 0) {
 }
 const edgeTypes = Object.keys(L.EDGE);
 async function editInventory(req, u) {
-  let file;
+  let file, body = {};
+  if (req.method !== 'GET') try { body = JSON.parse((await readBody(req, 256 * 1024)) || '{}'); } catch { return [400, { error: 'badJson' }]; }
+  // read after the body has arrived, so nothing written meanwhile (an enrolment, a hand edit) is overwritten: from here to the write there is no await
   try { file = readInventoryFile(); } catch (e) { return [409, { error: 'inventoryBroken', detail: e.message }]; }
   if (req.method === 'GET') return [200, { rev: file.rev, assets: file.list, edgeTypes: Object.entries(L.EDGE).map(([type, c]) => ({ type, label: c.label })) }];
-  let body = {};
-  try { body = JSON.parse((await readBody(req, 256 * 1024)) || '{}'); } catch { return [400, { error: 'badJson' }]; }
   if (body.rev !== file.rev) return [409, { error: 'conflict', rev: file.rev }];
   const [, , , id, action] = u.pathname.split('/').map(decodeURIComponent);
   const ids = file.list.map(a => a.id), i = ids.indexOf(id);
@@ -1021,7 +1102,7 @@ if (OLLAMA_MODEL) every('ai', 10 * 60_000, async () => {
   } catch (e) { state.aiStatus = { ok: false, err: `Ollama not reachable at ${OLLAMA_URL}: ${e.message}` }; }
 });
 setTimeout(() => every('wordpress', 30 * 60_000, inv => onboard(inv, 'wp', () => checkWordPress(inv))), 25_000); // after KEV is loaded
-every('inventory', 15 * 60_000, checkInventoryAge);
+every('inventory', 15 * 60_000, async inv => { await checkInventoryAge(inv); checkMachines(inv); });
 setTimeout(() => every('edge', 15 * 60_000, inv => onboard(inv, 'adv', () => checkEdge(inv))), 35_000); // after KEV is loaded
 setTimeout(() => every('epss', 2 * 3600_000, checkEpss), 90_000); // after the first OSV / Wordfence / KEV results
 
@@ -1047,7 +1128,7 @@ every('health', 60_000, async () => {
   if (!inv$.broken && !inv$.errors.length) {
     const ids = new Set(inventory({ includePaused: true }).map(a => a.id));
     for (const a of Object.values(state.alerts)) if (a.asset && !ids.has(a.asset)) delete state.alerts[a.key];
-    for (const m of [state.status, state.web, state.dns, state.domain, state.avail, state.kev.checked || {}]) for (const id of Object.keys(m)) if (!ids.has(id)) delete m[id];
+    for (const m of [state.status, state.web, state.dns, state.domain, state.avail, state.kev.checked || {}, state.machines]) for (const id of Object.keys(m)) if (!ids.has(id)) delete m[id];
     // per-device and per-asset records: devices removed from an asset go too
     const devs = new Set(inventory({ includePaused: true }).flatMap(a => a.stack.filter(x => x.edge).map(x => `${a.id}:${x.edgeIndex}`)));
     for (const m of [state.adv, state.edgeSeen]) for (const d of Object.keys(m)) if (!devs.has(d)) delete m[d];
@@ -1136,6 +1217,16 @@ function authFailed(ip) {
   if (authFails.size > 10_000) authFails.clear();
 }
 
+// Bad install-line tokens have their own counter: behind a proxy every request shares one address,
+// and a stranger guessing tokens must not lock you out of the dashboard
+const enrollFails = (() => {
+  const m = new Map();
+  return {
+    blocked: ip => { const f = m.get(ip); return f && f.n >= 10 && Date.now() - f.at < 600_000; },
+    fail: ip => { const f = m.get(ip); m.set(ip, f && Date.now() - f.at < 600_000 ? { n: f.n + 1, at: f.at } : { n: 1, at: Date.now() }); if (m.size > 10_000) m.clear(); },
+  };
+})();
+
 // Listening beyond this machine without a password exposes every client's inventory: refuse unless explicitly allowed
 const LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
 if (!LOCAL && !DASH_PASS && ALLOW_NO_PASSWORD !== 'true') {
@@ -1183,6 +1274,16 @@ http.createServer(async (req, res) => {
     try { const [code, out] = await inventoryPush(req, u); return json(out, code); }
     catch (e) { return json({ error: e.message }, 400); }
   }
+  if (u.pathname === '/api/enroll' && req.method === 'POST') {
+    if (enrollFails.blocked(ip)) { res.writeHead(429, { 'retry-after': '600', ...NO_STORE }); return res.end('too many failed attempts'); }
+    if (!CHECKIN_SECRET) return json({ error: 'enrolment needs CHECKIN_SECRET on the Vigía server' }, 503);
+    try { const [code, out] = await enroll(req); if (code === 401) enrollFails.fail(ip); return json(out, code); }
+    catch (e) { return json({ error: e.message }, 400); }
+  }
+  if (req.method === 'GET' && u.pathname.startsWith('/agent/') && AGENT_FILES[u.pathname.slice(7)]) {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache', ...SECURITY_HEADERS });
+    return res.end(fs.readFileSync(path.join(DIR, 'deploy', AGENT_FILES[u.pathname.slice(7)])));
+  }
   if (u.pathname.startsWith('/api/backup/') && req.method === 'POST') {
     try { const [code, out] = await backupCheckin(req, u); return json(out, code); }
     catch (e) { return json({ error: e.message }, 400); }
@@ -1204,10 +1305,21 @@ http.createServer(async (req, res) => {
     status: state.status, alerts: Object.values(state.alerts), feeds: state.feeds,
     maintenance: (state.maintenance || []).filter(w => Date.parse(w.to) > Date.now()),
     channels: state.channels, chain: state.chain, wordfence: { configured: !!WORDFENCE_API_KEY, feedAt: wf.at || null },
-    pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [] }])), backups: state.backups,
-    notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
+    pushed: Object.fromEntries(Object.entries(pushed).map(([k, v]) => [k, { at: v.at || null, host: v.host, components: v.stack?.length || 0, errors: v.errors || [],
+      ...(v.machine && { machine: { platform: v.machine.platform, os: v.machine.os, av: v.machine.av, patches: v.machine.patches, software: v.machine.software?.length ?? null,
+        listening: (v.machine.listening || []).filter(p => p.network).slice(0, 60) } }) }])), backups: state.backups,
+    notify: { ntfy: !!NTFY_TOPIC, telegram: !!TELEGRAM_BOT_TOKEN, webhook: !!WEBHOOK_URL, email: EMAIL, heartbeat: !!HEARTBEAT_URL, phoneAck: !!(PUBLIC_URL && ACK_SECRET) },
   });
   if (u.pathname === '/api/ack' && req.method === 'POST') { ackAlert(key); return json({ ok: true }); }
+  if (u.pathname === '/api/enroll-token' && req.method === 'POST') {
+    if (!CHECKIN_SECRET) return json({ error: 'noCheckinSecret' }, 503);
+    let b = {};
+    try { b = JSON.parse((await readBody(req, 4096)) || '{}'); } catch { return json({ error: 'badJson' }, 400); }
+    const client = String(b.client || '').trim();
+    if (!client || client.length > 100) return json({ error: 'client required' }, 400);
+    const out = enrollToken(req, client);
+    return out ? json(out) : json({ error: 'badUrl' }, 400);
+  }
   if (u.pathname === '/api/test' && req.method === 'POST') {
     const r = await notify('P1', T.testTitle, T.testBody, 'test');
     if (!r.total) return json({ ok: false, error: 'no alert channel configured' }, 400);
@@ -1228,7 +1340,7 @@ http.createServer(async (req, res) => {
   }
   json({ error: 'not found' }, 404);
 }).listen(PORT, HOST, () => {
-  const ch = [NTFY_TOPIC && 'ntfy', TELEGRAM_BOT_TOKEN && 'telegram', WEBHOOK_URL && 'webhook'].filter(Boolean).join('+') || 'NONE (console only)';
+  const ch = [NTFY_TOPIC && 'ntfy', TELEGRAM_BOT_TOKEN && 'telegram', WEBHOOK_URL && 'webhook', EMAIL && 'email'].filter(Boolean).join('+') || 'NONE (console only)';
   log(`Vigía on http://${HOST}:${PORT} — alerts: ${ch} — heartbeat: ${HEARTBEAT_URL ? 'yes' : 'NO'} — phone ack: ${PUBLIC_URL && ACK_SECRET ? 'yes' : 'no'}`);
   if (!LOCAL && !DASH_PASS) log('WARNING: listening without DASH_PASS (ALLOW_NO_PASSWORD=true)');
 });

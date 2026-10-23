@@ -493,3 +493,83 @@ test('digestPick uses the cursor, not the last 24 h', () => {
 test('edge devices keep the "checked" date', () => {
   assert.equal(L.edgeItem({ type: 'fortigate', version: '7.2.5', checked: '2026-10-01' }, 0).checked, '2026-10-01');
 });
+
+test('Windows: endoflife.date cycles from the registry, Server by year', () => {
+  assert.deepEqual(L.windowsOs({ productName: 'Windows 10 Pro', displayVersion: '24H2', build: 26100, edition: 'Professional' }).item.cycles, ['11-24h2-w', '11-24h2']);
+  assert.deepEqual(L.windowsOs({ productName: 'Windows 10 Enterprise', displayVersion: '22H2', build: 19045, edition: 'Enterprise' }).item.cycles, ['10-22h2-e', '10-22h2']);
+  assert.equal(L.windowsOs({ productName: 'Windows 10 Enterprise LTSC 2021', displayVersion: '21H2', build: 19044, edition: 'EnterpriseS' }).item.cycles[0], '10-21h2-e-lts');
+  const srv = L.windowsOs({ productName: 'Windows Server 2012 R2 Standard', build: 9600, installationType: 'Server' });
+  assert.deepEqual([srv.item.eol, srv.item.cycles[0]], ['windows-server', '2012-r2']);
+  assert.equal(L.windowsOs({ productName: 'Windows 10 Pro', build: 10240 }).item, null, 'no version, no guess');
+  const cycles = [{ cycle: '11-24h2-w', eol: '2026-10-13' }, { cycle: '10-22h2', eol: '2025-10-14' }];
+  assert.equal(L.matchCycles(cycles, ['10-22h2-w', '10-22h2']).cycle, '10-22h2');
+  assert.equal(L.matchCycles(cycles, ['11-25h2-w']), null);
+});
+
+test('installed software: only what attackers go after becomes a KEV watch', () => {
+  assert.deepEqual(L.softwareItem({ name: 'Google Chrome', version: '131.0.1' }), { product: 'Google Chrome', kev: ['chromium', 'google chrome'], sw: true, version: '131.0.1', kevPrio: 'P3' });
+  assert.equal(L.softwareItem({ name: '7-Zip 24.08 (x64)', version: '24.08' }).product, '7-Zip');
+  assert.equal(L.softwareItem({ name: 'Veeam Backup & Replication', version: '12.1' }).kevPrio, undefined, 'servers software pages normally');
+  assert.equal(L.softwareItem({ name: 'Microsoft SQL Server 2019 Setup (English)' }), null);
+  assert.equal(L.softwareItem({ name: 'Paint.NET' }), null);
+  assert.ok(L.kevMatches({ vendorProject: 'RARLAB', product: 'WinRAR' }, L.softwareItem({ name: 'WinRAR 7.01 (64-bit)' })));
+  assert.ok(L.kevMatches({ vendorProject: 'Google', product: 'Chromium V8' }, L.softwareItem({ name: 'Google Chrome' })));
+});
+
+test('listening ports: loopback apart, one entry per port, risky services found', () => {
+  const l = L.normListening([{ proto: 'tcp', addr: '127.0.0.1', port: 3306 }, { proto: 'tcp6', addr: '::', port: 3306, process: 'mysqld' },
+    { proto: 'tcp', addr: '127.0.0.1', port: 631 }, { proto: 'tcp', addr: 'fe80::1%en0', port: 22 }, { port: 'x' }, { port: 70000 }]);
+  assert.deepEqual(l.map(p => [p.port, p.network]), [[22, true], [631, false], [3306, true]]);
+  assert.deepEqual(L.networkPorts(l), ['tcp/22', 'tcp/3306']);
+  const f = L.machineFindings({ platform: 'linux', listening: l });
+  assert.deepEqual(f.map(x => [x.kind, x.prio]), [['risky', 'P3']]);
+  assert.match(f[0].services[0], /^MySQL \(tcp\/3306, mysqld\)$/);
+  // Windows always listens on SMB: not news there; an open Docker API is
+  assert.deepEqual(L.machineFindings({ platform: 'windows', av: [{ name: 'Microsoft Defender', enabled: true }], listening: L.normListening([{ addr: '0.0.0.0', port: 445 }]) }), []);
+  assert.equal(L.machineFindings({ platform: 'linux', listening: L.normListening([{ addr: '0.0.0.0', port: 2375 }]) })[0].prio, 'P2');
+});
+
+test('antivirus and updates: Windows without protection pages, old signatures and patches are noted', () => {
+  const now = Date.parse('2026-10-23T10:00:00Z'), day = 864e5, kinds = m => L.machineFindings(m, now).map(x => `${x.kind}:${x.prio}`);
+  assert.deepEqual(kinds({ platform: 'windows', av: [] }), ['av:P2']);
+  assert.deepEqual(kinds({ platform: 'windows', av: [{ name: 'Microsoft Defender', enabled: true, realTime: false }] }), ['av:P2']);
+  // Defender passive behind an active third-party product is fine
+  assert.deepEqual(kinds({ platform: 'windows', av: [{ name: 'Microsoft Defender', enabled: false }, { name: 'ESET', enabled: true, realTime: true, upToDate: true }] }), []);
+  assert.deepEqual(kinds({ platform: 'windows', av: [{ name: 'Microsoft Defender', enabled: true, signaturesAt: now - 12 * day }] }), ['avold:P3']);
+  assert.deepEqual(kinds({ platform: 'linux', av: [] }), [], 'a Linux server without antivirus is normal');
+  assert.deepEqual(kinds({ platform: 'windows', av: [{ name: 'D', enabled: true }], patches: { lastInstalled: now - 50 * day } }), ['patch:P3']);
+  assert.deepEqual(kinds({ platform: 'windows', av: [{ name: 'D', enabled: true }], patches: { lastInstalled: now - 100 * day } }), ['patch:P2']);
+});
+
+test('push with machine parts: OS, antivirus, software and ports parsed, nothing else needed', () => {
+  const r = L.parsePush({ parts: [
+    { kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '23H2', build: 22631, edition: 'Professional' },
+    { kind: 'av', products: [{ name: 'Microsoft Defender', enabled: true, realTime: true, upToDate: true, signaturesAt: '2026-10-22T08:00:00Z' }] },
+    { kind: 'software', items: [{ name: 'Google Chrome', version: '131.0' }, { name: 'Paint.NET', version: '5.0' }, { version: 'no name' }] },
+    { kind: 'listening', ports: [{ proto: 'tcp', addr: '0.0.0.0', port: 3389, process: 'svchost' }] },
+    { kind: 'patches', lastInstalled: '2026-10-15T00:00:00Z', id: 'KB5066793' },
+  ] });
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.machine.platform, 'windows');
+  assert.equal(r.machine.os, 'Windows 11 23H2 (Professional)');
+  assert.equal(r.machine.software.length, 2);
+  assert.equal(r.machine.av[0].signaturesAt, Date.parse('2026-10-22T08:00:00Z'));
+  assert.deepEqual(r.stack.map(s => s.product), ['windows', 'Google Chrome']);
+  const mac = L.parsePush({ parts: [{ kind: 'os', id: 'macos', version: '15.6.1' }] });
+  assert.deepEqual([mac.machine.platform, mac.stack[0].behind], ['macos', true]);
+});
+
+test('enrolment tokens: client inside, expiring, tamper-proof; same computer, same asset', () => {
+  const now = Date.now(), exp = Math.floor(now / 1000) + 3600, tok = L.signEnroll('s', 'Peluquería Ana', exp);
+  assert.equal(L.verifyEnroll('s', tok, now), 'Peluquería Ana');
+  assert.equal(L.verifyEnroll('other', tok, now), null);
+  assert.equal(L.verifyEnroll('s', tok, (exp + 1) * 1000), null, 'expired');
+  const [c, e, sig] = tok.split('.');
+  assert.equal(L.verifyEnroll('s', `${Buffer.from('Otro').toString('base64url')}.${e}.${sig}`, now), null, 'client swapped');
+  assert.equal(L.verifyEnroll('s', `${c}.${exp + 999}.${sig}`, now), null, 'expiry extended');
+  assert.equal(L.verifyEnroll('s', '', now), null);
+  const list = [{ id: 'peluqueria-ana-recepcion', client: 'Peluquería Ana', machineId: 'aa'.repeat(32) }];
+  assert.deepEqual(L.enrollTarget(list, { client: 'Peluquería Ana', host: 'RECEPCION', machineId: 'aa'.repeat(32) }), { id: 'peluqueria-ana-recepcion', existing: true });
+  assert.deepEqual(L.enrollTarget(list, { client: 'Peluquería Ana', host: 'RECEPCION', machineId: 'bb'.repeat(32) }), { id: 'peluqueria-ana-recepcion-2', existing: false });
+  assert.deepEqual(L.loadInventory([{ id: 'pc', client: 'A', machine: 'PC' }]).errors, []);
+});

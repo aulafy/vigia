@@ -110,6 +110,10 @@ deploy/vigia-checkin.sh acme-shop db restore                                    
 
 Both scripts need only `sh`, `openssl` and `curl`. Details: [inventory-push.md](inventory-push.md), [backups.md](backups.md).
 
+### Computers (PCs, Macs, office servers)
+
+**Clients → the client → Add computers → Create install line**, then run the line on each computer: the terminal line on Linux and macOS (with `sudo`), the PowerShell line on Windows (as Administrator). Each computer appears under the client and reports daily: OS, antivirus, installed software, listening ports, last update. Vigía must be reachable from them (`PUBLIC_URL`, ideally HTTPS) and `CHECKIN_SECRET` must be set. Details: [computers.md](computers.md).
+
 ## 4. When Vigía pages you
 
 | Priority | Means | You get |
@@ -160,7 +164,9 @@ Not sure what an alert means, or how to tell the client? With local AI on, press
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Test alert: *no alert channel configured* | No `NTFY_TOPIC`, Telegram or webhook in `.env` | Set one and restart. |
+| Test alert: *no alert channel configured* | No `NTFY_TOPIC`, Telegram, webhook or email in `.env` | Set one and restart. |
+| Install line: *invalid or expired* | The line is older than `ENROLL_DAYS` (7) | Create a new one in the dashboard. |
+| Install line: *cannot reach* | The computer cannot reach `PUBLIC_URL` | Use an address the computer reaches (VPN, tunnel, reverse proxy with HTTPS). |
 | Test alert: *no channel delivered it* | Wrong topic or token, or the network blocks the channel | Read the error in **Settings → Alert channels**. |
 | The phone doesn't ring at night | ntfy is not allowed to bypass Do Not Disturb | Allow it in the ntfy app's topic settings. |
 | Container exits: *Refusing to listen … without DASH_PASS* | Docker listens on all interfaces | Set `DASH_PASS` in `.env`. |

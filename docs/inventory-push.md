@@ -69,7 +69,11 @@ x-vigia-timestamp / x-vigia-signature: same scheme as backup check-ins (docs/bac
   {"kind": "cyclonedx", "bom": { …CycloneDX… }},
   {"kind": "spdx", "doc": { …SPDX… }},
   {"kind": "os", "id": "ubuntu", "version": "22.04"},
-  {"kind": "runtime", "name": "php", "version": "8.1.27"}
+  {"kind": "runtime", "name": "php", "version": "8.1.27"},
+  {"kind": "listening", "ports": [{"proto": "tcp", "addr": "0.0.0.0", "port": 3306, "process": "mysqld"}]},
+  {"kind": "av", "products": [{"name": "ClamAV", "enabled": true, "upToDate": null, "signaturesAt": "2026-10-22T08:00:00Z"}]},
+  {"kind": "software", "items": [{"name": "openvpn", "version": "2.6.3"}]},
+  {"kind": "patches", "lastInstalled": "2026-10-15T00:00:00Z", "id": "KB5066793"}
 ]}
 ```
 
@@ -103,3 +107,5 @@ WordPress components come from `--wp` pushes, or can be declared by hand in the 
 The alert says whether a fix exists and which version to update to: "Fix: update to 5.3.2", or "No fix available: remove or replace it". **Inactive plugins are included on purpose.** Their files can still be reached and exploited while they are installed, so the alert marks them as "inactive".
 
 Records marked as informational in the feed are skipped. Alerts cite *Wordfence Intelligence* as the source, and Vigía uses the data under Wordfence's terms. See the copyright notices included in the feed.
+
+`listening`, `av`, `software` and `patches` describe the machine itself and drive the findings in [computers.md](computers.md). `os` also accepts `{"id": "windows", "productName", "displayVersion", "build", "edition", "installationType"}` and `{"id": "macos", "version"}`.

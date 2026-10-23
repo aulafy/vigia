@@ -139,3 +139,6 @@ details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-
 }
 @media (prefers-reduced-motion:reduce){.sk{animation:none}}
 @media print{.side,.tabbar,.toolbar,.btn{display:none!important}.app{display:block}}
+/* install lines: wrap anywhere so a long token never scrolls the page sideways */
+pre.cmd{margin:6px 0 8px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-all;user-select:all}
+.enroll{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}.enroll .fld{flex:1 1 260px;margin:0}.cmdbox{margin-bottom:14px}

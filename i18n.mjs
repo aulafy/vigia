@@ -122,6 +122,21 @@ const en = {
   wpNoKeyBody: n => `${n} assets list WordPress core, plugins or themes, but WORDFENCE_API_KEY is not set. Get a free key at wordfence.com/products/wordfence-intelligence.`,
   invStale: a => `${a.client}: inventory of ${a.name} is out of date`,
   invStaleBody: f => f.never ? `No inventory received in ${f.hours} h (expected every ${f.maxH} h). Vulnerability matching may be using old versions. Check the collector on the server.` : `Last inventory ${f.hours} h ago (expected every ${f.maxH} h). Vulnerability matching may be using old versions.`,
+  machAv: a => `${a.client}: ${a.name} has no active antivirus`,
+  machAvBody: (a, f) => `${f.products.length ? `Reported: ${f.products.join(', ')}, none active with real-time protection.` : 'Windows reports no antivirus at all.'} Check Windows Security on ${a.machine || a.name}.`,
+  machAvOld: a => `${a.client}: antivirus on ${a.name} is out of date`,
+  machAvOldBody: (a, f) => `${f.products.join(', ')}: signatures ${f.days != null ? `${f.days} days old` : 'not up to date'}. An antivirus that cannot update misses current threats.`,
+  machPatch: (a, f) => `${a.client}: ${a.name} without Windows updates for ${f.days} days`,
+  machPatchBody: (a, f) => `Last update installed ${f.days} days ago${f.id ? ` (${f.id})` : ''}. Microsoft ships fixes every month: check Windows Update on ${a.machine || a.name}.`,
+  machRisky: a => `${a.client}: ${a.name} has risky services listening on the network`,
+  machRiskyBody: (a, f) => `${f.services.join(', ')}. Listening on the network is not the same as reachable from the Internet: check the router or firewall, and close what nobody uses.`,
+  machPortNew: (a, p) => `${a.client}: new service listening on ${a.name} (${p})`,
+  machPortNewBody: (a, p, proc) => `${p}${proc ? ` (${proc})` : ''} was not listening at the previous inventory. If it is expected, acknowledge to accept it.`,
+  osBehind: (a, s, latest) => `${a.client}: ${a.name} is behind on macOS updates (${s.version} < ${latest})`,
+  osBehindBody: (a, s, latest) => `macOS ${latest} is available for this version. Install it from System Settings → General → Software Update.`,
+  enrolled: (client, n) => `${client}: ${n} computer${n === 1 ? '' : 's'} added today`,
+  enrolledBody: hosts => `Added from the install line: ${hosts.join(', ')}. If you do not recognise one, delete it in the dashboard and generate a new line.`,
+  mailFooter: url => `${url ? `Dashboard: ${url}\n` : ''}Sent by Vigía. You receive this because your address is in MAIL_TO.`,
 };
 
 const es = {
@@ -247,6 +262,21 @@ const es = {
   wpNoKeyBody: n => `${n} activos tienen núcleo, plugins o temas de WordPress, pero falta WORDFENCE_API_KEY. Consigue una clave gratuita en wordfence.com/products/wordfence-intelligence.`,
   invStale: a => `${a.client}: el inventario de ${a.name} está desactualizado`,
   invStaleBody: f => f.never ? `No ha llegado ningún inventario en ${f.hours} h (se espera cada ${f.maxH} h). El cruce de vulnerabilidades puede estar usando versiones antiguas. Revisa el colector del servidor.` : `Último inventario hace ${f.hours} h (se espera cada ${f.maxH} h). El cruce de vulnerabilidades puede estar usando versiones antiguas.`,
+  machAv: a => `${a.client}: ${a.name} no tiene antivirus activo`,
+  machAvBody: (a, f) => `${f.products.length ? `Detectado: ${f.products.join(', ')}, ninguno activo con protección en tiempo real.` : 'Windows no informa de ningún antivirus.'} Revisa Seguridad de Windows en ${a.machine || a.name}.`,
+  machAvOld: a => `${a.client}: el antivirus de ${a.name} está desactualizado`,
+  machAvOldBody: (a, f) => `${f.products.join(', ')}: firmas ${f.days != null ? `de hace ${f.days} días` : 'sin actualizar'}. Un antivirus que no se actualiza no reconoce las amenazas actuales.`,
+  machPatch: (a, f) => `${a.client}: ${a.name} lleva ${f.days} días sin actualizaciones de Windows`,
+  machPatchBody: (a, f) => `Última actualización instalada hace ${f.days} días${f.id ? ` (${f.id})` : ''}. Microsoft publica parches cada mes: revisa Windows Update en ${a.machine || a.name}.`,
+  machRisky: a => `${a.client}: ${a.name} tiene servicios delicados escuchando en la red`,
+  machRiskyBody: (a, f) => `${f.services.join(', ')}. Escuchar en la red no es lo mismo que ser accesible desde Internet: revisa el router o el cortafuegos y cierra lo que nadie use.`,
+  machPortNew: (a, p) => `${a.client}: servicio nuevo escuchando en ${a.name} (${p})`,
+  machPortNewBody: (a, p, proc) => `${p}${proc ? ` (${proc})` : ''} no estaba escuchando en el inventario anterior. Si es esperado, confírmalo para aceptarlo.`,
+  osBehind: (a, s, latest) => `${a.client}: ${a.name} tiene macOS sin actualizar (${s.version} < ${latest})`,
+  osBehindBody: (a, s, latest) => `Hay disponible macOS ${latest} para esta versión. Instálalo en Ajustes del Sistema → General → Actualización de software.`,
+  enrolled: (client, n) => `${client}: ${n} ${n === 1 ? 'ordenador dado' : 'ordenadores dados'} de alta hoy`,
+  enrolledBody: hosts => `Alta desde la línea de instalación: ${hosts.join(', ')}. Si no reconoces alguno, bórralo en el panel y genera una línea nueva.`,
+  mailFooter: url => `${url ? `Panel: ${url}\n` : ''}Enviado por Vigía. Lo recibes porque tu dirección está en MAIL_TO.`,
 };
 
 export const messages = lang => (String(lang).toLowerCase().startsWith('es') ? es : en);

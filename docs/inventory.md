@@ -13,11 +13,12 @@ Vigía picks up every change to the file without a restart. Invalid entries are 
 | `id` | yes | `"acme-shop"` | Unique, stable identifier. Alerts are keyed on it, so do not rename it casually. |
 | `client` | recommended | `"ACME Ltd"` | Shown at the start of every alert. |
 | `name` | recommended | `"Online shop"` | Human-readable name. |
-| `domain` | `domain`, `url` or `edge` | `"example.com"` | Used for the TLS check, and for the uptime check when there is no `url`. |
-| `url` | `domain`, `url` or `edge` | `"https://example.com/health"` | Exact URL for the uptime check. Redirects are followed. |
+| `domain` | `domain`, `url`, `edge` or `machine` | `"example.com"` | Used for the TLS check, and for the uptime check when there is no `url`. |
+| `url` | `domain`, `url`, `edge` or `machine` | `"https://example.com/health"` | Exact URL for the uptime check. Redirects are followed. |
 | `expect` | no | `"Add to cart"` | Text that must appear in the response. Catches broken pages that still return 200, such as a white screen, a database error or a defaced homepage. |
 | `criticality` | no (`medium`) | `"high"` | `high`, `medium` or `low`. A high asset turns downtime, KEV matches and critical CVEs into **P1**. |
 | `contact` | no | `"Jane +34 600…"` | Included in downtime alerts so you know who to call. |
+| `machine` | `domain`, `url`, `edge` or `machine` | `"RECEPCION"` | A computer or server that reports through the agent. Set by the install line together with `machineId` and `enrolledAt`; see [computers.md](computers.md). |
 | `stack` | no | `[…]` | Software the asset runs (see below). |
 | `paused` | no | `true` | Skip every check, for example during a migration. Existing alerts are kept. |
 | `failThreshold` | no (`2`) | `3` | Consecutive failed probes before raising a downtime alert. |

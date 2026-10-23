@@ -5,7 +5,7 @@ import { ed, openEditor, editorPage, onInput as editorInput, onAction as editorA
 
 const esc = M.esc;
 const root = document.getElementById('root');
-const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '', ai: {} };
+const ui = { S: null, error: null, refreshedAt: 0, filter: { view: 'open', prio: '', client: '', q: '' }, open: new Set(), html: '', ai: {}, enroll: {} };
 
 // per-viewer preferences only (theme, language); everything that matters lives on the server
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } return null; };
@@ -18,7 +18,7 @@ const MORE = ['copias', 'informes', 'ajustes'];
 
 function route() {
   const [page, ...rest] = location.hash.replace(/^#\/?/, '').split('/');
-  return { page: NAV.some(n => n[0] === page) || ['mas', 'editar', 'nuevo'].includes(page) ? page : 'hoy', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
+  return { page: NAV.some(n => n[0] === page) || ['mas', 'editar', 'nuevo', 'alta'].includes(page) ? page : 'hoy', arg: rest.length ? decodeURIComponent(rest.join('/')) : null };
 }
 
 async function api(method, path, signal) {
@@ -110,6 +110,46 @@ function siteRow(a, S, { actions = false } = {}) {
   return `<div class="row"><span class="state ${a.paused ? 'off' : maint ? 'warn' : bad ? 'bad' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}${maint ? ` <span class="pill warn">${esc(t.mt.title)}</span>` : ''}</div><div class="meta">${site ? meta : esc(a.id)}</div></div><div class="side-r">${status}${acts}</div></div>`;
 }
 
+function machineRow(a, S) {
+  const t = T(), M2 = t.mc, m = a.m, E = t.ed;
+  const meta = m ? [m.os, a.av === null ? null : a.av ? `${M2.av}: ${a.av}` : '', m.software != null ? M2.sw.replace('{n}', m.software) : '',
+    m.patches?.lastInstalled ? `${M2.lastPatch}: ${ago(m.patches.lastInstalled)}` : '', `${t.inventory} ${ago(a.at)}`].filter(Boolean).join(' · ') : M2.waiting;
+  const top = a.alerts.slice(0, 2).map(x => `<div class="body"><span class="tag ${x.prio}">${x.prio}</span> ${esc(x.title)}</div>`).join('');
+  const ports = a.ports.length ? `<div class="meta">${esc(M2.ports)}: ${esc(a.ports.slice(0, 8).join(', '))}${a.ports.length > 8 ? ' …' : ''}</div>` : '';
+  const acts = `<span class="rowacts"><a class="btn small" href="#/editar/${encodeURIComponent(a.id)}">${esc(E.edit)}</a><button class="btn small" data-act="pause" data-key="${esc(a.id)}" data-v="${a.paused ? 0 : 1}">${esc(a.paused ? E.resume : E.pause)}</button></span>`;
+  return `<div class="row"><span class="state ${a.paused ? 'off' : a.worst === 'P1' ? 'bad' : a.worst ? 'warn' : ''}"></span><div class="main"><div class="title">${esc(a.name || a.id)}${a.paused ? ` <span class="pill">${esc(t.paused)}</span>` : ''}</div>
+    <div class="meta">${esc(meta)}</div>${ports}${top}</div><div class="side-r">${a.av === null ? `<span class="pill bad">${esc(M2.noAv)}</span>` : ''}${tags({ P1: a.alerts.filter(x => x.prio === 'P1').length, P2: a.alerts.filter(x => x.prio === 'P2').length, P3: a.alerts.filter(x => x.prio === 'P3').length }) || (m ? '<span class="pill ok">OK</span>' : '')}${acts}</div></div>`;
+}
+
+// "Add computers": one install line per system, with a token for this client
+function enrollPage(S, client) {
+  const t = T(), M2 = t.mc, e = ui.enroll, clients = M.clientsView(S).map(c => c.name);
+  if (client && e.client !== client && !e.typed) Object.assign(ui.enroll, { client, data: null, error: null });
+  const d = e.data, back = client ? `#/clientes/${encodeURIComponent(client)}` : '#/clientes';
+  const fmt = ms => new Date(ms).toLocaleDateString(lang().startsWith('es') ? 'es-ES' : 'en-GB', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+  const cmd = (label, k) => `<div class="cmdbox"><b class="small">${esc(label)}</b><pre class="cmd" id="cmd-${k}">${esc(d.commands[k])}</pre><button class="btn small" data-act="copy-cmd" data-k="${k}">${icon('copy', 'sm')}${esc(M2.copy)}</button></div>`;
+  return head(M2.add, M2.addSub, `<a class="btn" href="${back}">${icon('back', 'sm')}${esc(t.back)}</a>`)
+    + (S.config?.checkin === false ? `<div class="banner warn">${icon('alert')}${esc(M2.noSecret)}</div>` : '')
+    + `<div class="section"><form class="enroll" data-act="enroll-form"><label class="fld" for="enroll-client"><span>${esc(M2.client)}</span>
+      <input id="enroll-client" list="enroll-clients" value="${esc(e.client || '')}" maxlength="100" autocomplete="off"></label><datalist id="enroll-clients">${clients.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      <button class="btn primary" data-act="enroll-gen" ${e.loading ? 'disabled' : ''}>${icon('plus', 'sm')}${esc(M2.generate)}</button></form>
+      ${e.error ? `<div class="banner bad">${icon('alert')}${esc(e.error)}</div>` : ''}<p class="mut small">${esc(M2.sends)}</p></div>`
+    + (d ? `<div class="section">${d.local ? `<div class="banner warn">${icon('alert')}${esc(M2.local)}</div>` : !d.https ? `<div class="banner warn">${icon('lock')}${esc(M2.http)}</div>` : ''}
+      ${cmd(M2.linux, 'unix')}${cmd(M2.windows, 'windows')}<p class="mut small">${esc(M2.expires.replace('{date}', fmt(d.expires)).replace('{client}', d.client))}</p></div>` : '');
+}
+async function enrollGenerate() {
+  const t = T(), client = String(ui.enroll.client || '').trim();
+  if (!client) { ui.enroll.error = t.ed.err.required; return render(); }
+  Object.assign(ui.enroll, { loading: true, error: null }); render();
+  try {
+    const r = await fetch('/api/enroll-token', { method: 'POST', headers: { 'x-vigia-ui': '1', 'content-type': 'application/json' }, body: JSON.stringify({ client }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error === 'noCheckinSecret' ? t.mc.noSecret : data.error === 'badUrl' ? t.mc.badUrl : data.error || `HTTP ${r.status}`);
+    ui.enroll.data = data;
+  } catch (err) { ui.enroll.error = err.message; }
+  ui.enroll.loading = false; ui.html = ''; render();
+}
+
 function deviceRow(d) {
   const t = T(), open = d.alerts.filter(a => !a.ack);
   const count = { P1: open.filter(a => a.prio === 'P1').length, P2: open.filter(a => a.prio === 'P2').length, P3: open.filter(a => a.prio === 'P3').length };
@@ -157,7 +197,7 @@ const PAGES = {
   clientes(S, arg) {
     const t = T(), view = M.clientsView(S);
     if (arg) return clientDetail(S, view.find(c => c.name === arg));
-    return head(t.nav.clientes, t.sub.clientes, `<a class="btn primary" href="#/nuevo">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`) + list(view.map(c => {
+    return head(t.nav.clientes, t.sub.clientes, `<a class="btn" href="#/alta">${icon('pc', 'sm')}${esc(t.mc.add)}</a> <a class="btn primary" href="#/nuevo">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`) + list(view.map(c => {
       const meta = [`${c.assets.filter(a => a.url || a.domain).length} ${t.sites}`, c.devices ? `${c.devices} ${t.devices}` : '', c.checks ? `${M.fmtPct(c.ok, c.checks)} ${t.availability}` : ''].filter(Boolean).join(' · ');
       return `<a class="row link" href="#/clientes/${encodeURIComponent(c.name)}" style="color:inherit;text-decoration:none"><span class="state ${c.P1 || c.down ? 'bad' : c.P2 ? 'warn' : ''}"></span><div class="main"><div class="title">${esc(c.name)}</div><div class="meta">${esc(meta)}</div></div><div class="side-r">${tags(c) || `<span class="pill ok">OK</span>`}</div>${icon('chevron', 'sm')}</a>`;
     }), t.clientsEmpty);
@@ -210,6 +250,9 @@ const PAGES = {
     openEditor(location.hash, null, arg, () => { ui.html = ''; render(); });
     return editorPage(T(), arg ? `#/clientes/${encodeURIComponent(arg)}` : '#/clientes');
   },
+  alta(S, arg) {
+    return enrollPage(S, arg);
+  },
 
   mas() {
     const t = T();
@@ -223,11 +266,12 @@ function clientDetail(S, c) {
   const idx = M.assetIndex(S), ids = new Set(c.assets.map(a => a.id));
   const open = M.sortAlerts((S.alerts || []).filter(a => ids.has(a.asset)));
   const devices = M.devicesView(S).filter(d => d.client === c.name), backups = M.backupsView(S).filter(b => b.client === c.name);
-  const sites = c.assets.filter(a => a.url || a.domain), contact = c.assets.map(a => a.contact).find(Boolean);
-  return head(c.name, contact ? `${t.contact}: ${contact}` : '', `<a class="btn" href="#/clientes">${icon('back', 'sm')}${esc(t.back)}</a> <a class="btn primary" href="#/nuevo/${encodeURIComponent(c.name)}">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`)
+  const contact = c.assets.map(a => a.contact).find(Boolean), machines = M.machinesView(S).filter(a => a.client === c.name);
+  return head(c.name, contact ? `${t.contact}: ${contact}` : '', `<a class="btn" href="#/clientes">${icon('back', 'sm')}${esc(t.back)}</a> <a class="btn" href="#/alta/${encodeURIComponent(c.name)}">${icon('pc', 'sm')}${esc(t.mc.add)}</a> <a class="btn primary" href="#/nuevo/${encodeURIComponent(c.name)}">${icon('plus', 'sm')}${esc(t.ed.add)}</a>`)
     + `<div class="kpis">${kpi(c.checks ? M.fmtPct(c.ok, c.checks) : '—', t.availability)}${kpi(c.P1, t.p1)}${kpi(c.P2, t.p2)}${kpi(devices.length, t.nav.equipos)}</div>`
     + section(t.alertsFor, list(open.filter(a => !a.ack).map(a => alertRow(a, idx, { client: false })), t.nothingUrgent), 'alert')
-    + section(t.websites, list(c.assets.map(a => siteRow(a, S, { actions: true })), t.none), 'globe')
+    + section(t.websites, list(c.assets.filter(a => !a.machine || a.url || a.domain).map(a => siteRow(a, S, { actions: true })), t.none), 'globe')
+    + section(t.mc.title, list(machines.map(a => machineRow(a, S)), t.mc.none), 'pc')
     + (devices.length ? section(t.nav.equipos, list(devices.map(deviceRow), t.none), 'equipos') : '')
     + (backups.length ? section(t.nav.copias, list(backups.map(backupRow), t.none), 'copias') : '')
     + maintenanceBlock(S, t, { client: c.name })
@@ -288,6 +332,8 @@ root.addEventListener('click', async e => {
   if (['save', 'row-add', 'row-del', 'asset-del', 'pause'].includes(act)) { e.preventDefault(); if (await editorAction(act, b, { t, toast, go: h => { location.hash = h; }, refresh })) { ui.html = ''; render(); } return; }
   if (act === 'mt-start' || act === 'mt-end') { e.preventDefault(); return onMaintenanceAction(act, b, ui.S, { t, toast, refresh }); }
   if (act === 'filter') { ui.filter[b.dataset.k] = b.dataset.v; return render(); }
+  if (act === 'enroll-gen') { e.preventDefault(); return enrollGenerate(); }
+  if (act === 'copy-cmd') { const k = b.dataset.k; await copyText(ui.enroll.data?.commands?.[k] || '').then(() => toast(t.mc.copied), () => toast(t.mc.copied)); return; }
   if (act === 'theme') { const v = b.dataset.v; pref('vigia-theme', v === 'auto' ? null : v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; return render(); }
   if (act === 'lang') { pref('vigia-lang', b.dataset.v === 'auto' ? null : b.dataset.v); return render(); }
 });
@@ -307,9 +353,10 @@ root.addEventListener('change', e => {
 });
 root.addEventListener('input', e => {
   if (e.target.id === 'q') { ui.filter.q = e.target.value; return render(); }
+  if (e.target.id === 'enroll-client') { Object.assign(ui.enroll, { client: e.target.value, typed: true, data: null, error: null }); return render(); }
   if (e.target.type !== 'checkbox' && e.target.tagName !== 'SELECT' && (editorInput(e.target) || onMaintenanceInput(e.target))) render();
 });
-window.addEventListener('hashchange', () => { ui.html = ''; render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { if (route().page === 'alta') ui.enroll = {}; ui.html = ''; render(); window.scrollTo(0, 0); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 refresh();

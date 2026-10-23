@@ -1,6 +1,6 @@
 # Vigía
 
-**24/7 watch over your clients' websites, firewalls, domains and backups. It wakes you up only when something actually affects one of them.**
+**24/7 watch over your clients' websites, firewalls, domains, backups and computers. It wakes you up only when something actually affects one of them.**
 
 [![CI](https://github.com/aulafy/vigia/actions/workflows/ci.yml/badge.svg)](https://github.com/aulafy/vigia/actions/workflows/ci.yml)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933)
@@ -40,6 +40,7 @@ If you run IT for many small companies, you cannot read every CVE, advisory and 
 | 2 h | **EPSS early warning**: probability of exploitation in the next 30 days for the CVEs in your open alerts | ≥ 50 %: raised to **P1** · ≥ 10 %: P3 raised to P2 |
 | 30 min | **WordPress core, plugins and themes** against [Wordfence Intelligence](https://www.wordfence.com/products/wordfence-intelligence/) (free API key), with exact version ranges | KEV, or CVSS ≥ 9 unauthenticated or on a high-criticality asset: **P1** · CVSS ≥ 7: P2 · lower: P3 |
 | on push | **Pushed inventory:** each server reports what it really runs (WP-CLI, `package-lock.json`, `composer.lock`, CycloneDX/SPDX SBOM, OS, runtimes) with a signed call | No push within the expected window: P2 |
+| daily | **Computers and servers** added with one install line (Windows, Linux, macOS): operating system, antivirus, installed software, ports the machine listens on, last update. Nothing is scanned: each computer reports on itself. | Windows without active antivirus: P2 · no updates for 90 days: P2 (45: P3) · risky service listening on the network (RDP, databases, VNC…): P3 · exploited program installed (KEV): as above |
 | 6 h | **[endoflife.date](https://endoflife.date)**: runtimes, OSes and databases that lost, or are about to lose, security support | Already end-of-life: P2/P3 · within 90 days: P3 |
 | 60 s | **Self-health:** stale feeds, checks that keep failing for one asset or feed (coverage), alert channels, disk, and an outgoing heartbeat to an external service | P2 (disk: P1), or the external service pages you |
 | daily | **Digest** of open P2s and new P3s | one message |
@@ -145,6 +146,10 @@ A web app you can install on your phone, in light or dark mode, with seven secti
 
 With [Ollama](https://ollama.com) and `OLLAMA_MODEL` set, every alert gets **Explain** (what happens, the risk, steps, how to check) and **Draft for the client** (a plain-language message to copy). The model gets only the facts Vigía has about that alert, so it does not invent providers or versions. Everything runs on your machine, and the AI never decides, acknowledges or sends anything. See **[docs/ai.md](docs/ai.md)**.
 
+## Computers and servers
+
+**Clients → a client → Add computers** gives you one line for Linux and macOS and one for Windows. Run it on each computer: it joins that client and reports every day what it runs, which antivirus is active, when it was last updated and which ports it listens on. The line expires, each computer gets its own key, and nothing is scanned. See **[docs/computers.md](docs/computers.md)**.
+
 ## Monthly client reports
 
 One printable page per client and month: availability, incidents, response times, backups, edge devices and recommended actions. Open it from the dashboard, or let Vigía write all of them when the month ends. See **[docs/reports.md](docs/reports.md)**.
@@ -156,6 +161,7 @@ One printable page per client and month: availability, incidents, response times
 | **ntfy** | `NTFY_TOPIC` | Recommended. Priority 5 breaks through Do Not Disturb if you allow it. Has an **Acknowledge** button. |
 | **Telegram** | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Includes an acknowledge link. |
 | **Webhook** | `WEBHOOK_URL` | Sends JSON `{prio, title, body, key, ackUrl}`. Use it to connect PagerDuty, Better Stack, Opsgenie or Twilio for **phone calls and escalation to a second person**. |
+| **Email** | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, `MAIL_TO` | Built-in SMTP client (TLS or STARTTLS), to one or more addresses, with the acknowledge link. |
 
 Setup for each channel, phone acknowledgement and on-call escalation are covered in **[docs/alerts.md](docs/alerts.md)**.
 
@@ -169,10 +175,14 @@ All settings are environment variables, which can live in `.env`:
 | `NTFY_TOPIC`, `NTFY_SERVER`, `NTFY_TOKEN` | — , `https://ntfy.sh`, — | ntfy channel |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | Telegram channel |
 | `WEBHOOK_URL` | — | Generic JSON webhook |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE` | —, `587`, auto (`true` on 465) | Email channel: SMTP server. STARTTLS is used when offered, and required before sending a password (except to `localhost`) |
+| `SMTP_ALLOW_PLAIN` | `false` | Allow sending without TLS to a remote relay that offers none (never with a password). Not recommended: alerts carry client names and acknowledge links |
+| `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`, `MAIL_TO` | —, —, `SMTP_USER`, — | Email credentials, sender, and recipients (comma-separated). Email is on when `SMTP_HOST` and `MAIL_TO` are set |
 | `HEARTBEAT_URL` | — | Pinged every minute (dead man's switch). Receives `/fail` when the alert chain is broken. |
 | `HEARTBEAT_FAIL_URL` | `HEARTBEAT_URL` + `/fail` | Failure URL, for services that use a different one |
 | `CANARY_DAYS`, `CANARY_ACK_HOURS` | `7`, `24` | Weekly test alert that must be acknowledged. `0` turns it off. |
-| `CHECKIN_SECRET` | — | Master secret for backup check-ins and inventory pushes. Servers never get it: they get per-asset keys (`node server.mjs key <asset>`) |
+| `CHECKIN_SECRET` | — | Master secret for backup check-ins, inventory pushes and computer install lines. Servers never get it: they get per-asset keys (`node server.mjs key <asset>`) |
+| `ENROLL_DAYS` | `7` | How long an install line for computers stays valid |
 | `WORDFENCE_API_KEY` | — | Free Wordfence Intelligence key, enables WordPress checks |
 | `WORDFENCE_HOURS`, `WORDFENCE_URL` | `6`, the v3 production feed | How often to refresh the feed, and from where (a mirror, for example) |
 | `PUBLIC_URL`, `ACK_SECRET` | — | Enable signed, expiring acknowledge links in P1/P2 notifications |
@@ -202,6 +212,9 @@ All settings are environment variables, which can live in `.env`:
 | `GET/POST /api/ack?key=…&f=…&e=…&sig=…` | signed link | Acknowledge from a notification. The link is bound to one alert (or one burst summary) and expires; an invalid one answers `410`. GET shows a confirmation button, so link previews cannot acknowledge by accident. |
 | `POST /api/backup/<asset>/<job>?status=…` | HMAC signature | Backup check-in, see [docs/backups.md](docs/backups.md#check-in-protocol) |
 | `POST /api/inventory/<asset>` | HMAC signature | Inventory push, see [docs/inventory-push.md](docs/inventory-push.md#protocol) |
+| `POST /api/enroll-token` | dashboard | Create an install line for a client: `{client}` → `{token, expires, commands: {unix, windows}}` |
+| `POST /api/enroll` | install-line token | A computer registers: `{token, host, machineId}` → `{asset, key}`. Ten bad tokens block the address for 10 minutes |
+| `GET /agent/install.sh`, `/agent/vigia-collect.sh`, `/agent/vigia-agent.ps1` | none | The agent scripts, so the install line needs only Vigía's address |
 | `GET /api/reports` | dashboard | Clients and months available for reports |
 | `GET /report?client=…&month=YYYY-MM` | dashboard | Monthly client report (HTML, printable) |
 | `GET /api/inventory`, `POST /api/assets`, `PUT/DELETE /api/assets/<id>`, `POST /api/assets/<id>/pause` | dashboard | Edit the inventory. Every write sends the revision it started from (`409` if the file changed meanwhile) and keeps a copy in `data/inventory-history/` |
@@ -217,7 +230,7 @@ Be honest with your clients about what is covered:
 - **Its AI is not an analyst.** The optional local model only explains and drafts, from Vigía's facts. Read what it writes before using it.
 - **It does not make phone calls by itself.** For a real on-call rotation with calls and escalation, send the webhook to PagerDuty, Better Stack or Grafana OnCall. One person is not a sustainable 24/7 rota.
 - **PrestaShop, Joomla and Drupal modules** are not covered by a dedicated feed yet: only through OSV (Composer packages) and KEV. WordPress is covered through Wordfence.
-- **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers.
+- **It does not scan networks or fingerprint devices.** Firewalls and VPNs are declared by you; Vigía only checks whether the management address you declared answers. Computers report on themselves through the agent you install: which ports *they* listen on, not what is reachable from the Internet.
 - **It is not a SIEM, EDR or WAF.** Logs, file integrity, malware and intrusion detection belong to tools like Wazuh, CrowdSec or Cloudflare. Vigía complements them.
 - **It only knows about backups that report in.** It cannot see inside your backup tool. A job that never calls `vigia-checkin.sh` is invisible, and a "success" is only as honest as the script that sends it. Real restore tests remain your job: Vigía only reminds you.
 - **The content check reads the HTML the server sends.** Scripts injected later by JavaScript, for example through a tag manager, or code that only shows up for some visitors (cloaking), are invisible to it. It catches the common cases, but it is not a full malware scanner.
@@ -234,6 +247,8 @@ npm test          # unit and HTTP integration tests (node:test, no dependencies)
 - `i18n.mjs` holds the alert texts in English and Spanish.
 - `report.mjs` renders the monthly client report (pure functions).
 - `ai.mjs` builds the grounded prompts for the optional local AI (pure functions).
+- `smtp.mjs` is the email channel: a small SMTP client (TLS, STARTTLS, AUTH PLAIN/LOGIN), tested against a local fake server.
+- `deploy/` holds the agents: `vigia-install.sh` and `vigia-collect.sh` (Linux, macOS), `vigia-agent.ps1` (Windows), `vigia-checkin.sh` (backups).
 - `public/` holds the dashboard: an installable web app with no build step (`app.js`, `model.js`, `icons.js`, `app.css`, `sw.js`). See [docs/dashboard.md](docs/dashboard.md).
 - `scripts/demo.mjs` runs the demo, and `scripts/make-icons.mjs` draws the app icons.
 
@@ -244,10 +259,11 @@ Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). To report a s
 ## Roadmap
 
 - New certificates in Certificate Transparency logs (as P3)
-- Windows collector (PowerShell) and PrestaShop/Drupal module feeds
+- PrestaShop/Drupal module feeds
+- A read-only portal per client (their own alerts and report), and per-client email recipients
 - Optional URL reputation through Google Web Risk
 - More vendor PSIRT feeds (SonicWall, Ivanti and Citrix publish no usable RSS today; INCIBE-CERT covers them)
-- Report delivery by email
+- Monthly report delivery by email
 - Built-in PagerDuty Events v2 and Twilio call integrations
 - Ubuntu USN and Debian DSA advisory feeds
 - Lower memory use for the Wordfence feed, and faster uptime rounds beyond 1,000 assets

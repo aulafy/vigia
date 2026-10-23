@@ -30,7 +30,8 @@ export function validateAsset(a, { ids = [], creating = false, edgeTypes = [] } 
   if (a.name && String(a.name).length > 100) add('name', 'tooLong', { max: 100 });
 
   const edge = Array.isArray(a.edge) ? a.edge : [];
-  if (!a.url && !a.domain && !edge.length) add('url', 'needTarget');
+  if (!a.url && !a.domain && !edge.length && !a.machine) add('url', 'needTarget');
+  if (a.machine != null && (typeof a.machine !== 'string' || a.machine.length > 100)) add('machine', 'tooLong', { max: 100 });
   if (a.url && !isUrl(a.url)) add('url', 'url');
   if (a.domain && !HOST_RE.test(a.domain)) add('domain', 'host');
   if (a.criticality && !LEVELS.includes(a.criticality)) add('criticality', 'oneOf', { values: LEVELS });

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.0 — 2026-10-23
+
+### Added
+- **Computers and servers with one install line.** **Clients → Add computers** creates a line for Linux/macOS (`curl … | sudo sh`) and one for Windows (PowerShell). Run on a computer, it registers it under that client, installs a daily job (systemd timer, cron, launchd or a scheduled task) and sends a signed inventory. That inventory covers the operating system, antivirus, installed software, ports the computer listens on and its last update. The line holds an expiring token signed with `CHECKIN_SECRET` (`ENROLL_DAYS`, default 7). Every computer gets its own key, and running the line again on the same computer updates it instead of adding a duplicate. Nothing is scanned: each computer reports on itself.
+- **New findings for computers:** Windows without an active antivirus (P2); antivirus signatures older than 7 days (P3); no Windows updates for 45 days (P3) or 90 (P2); risky services listening on the network (RDP, SMB outside Windows, FTP, Telnet, VNC, databases; P3, the Docker API P2); a new listening service since the first inventory (P3, acknowledge to accept it); macOS behind the latest release of its version (P3). Windows and Windows Server end of life comes from endoflife.date's own cycles (`11-24h2-w`, `10-22h2`, `2012-r2`…).
+- **Installed programs matched against CISA KEV:** WinRAR, 7-Zip, AnyDesk, TeamViewer, ScreenConnect, SimpleHelp, Veeam, PaperCut, MOVEit, GoAnywhere, CrushFTP, FortiClient, GlobalProtect, Acrobat, Java, Exchange and more. Browsers, Office and Zoom update themselves, so their matches are P3.
+- **Windows agent** `deploy/vigia-agent.ps1` (PowerShell 5.1+). It reads Defender and Windows Security products, programs from the registry, `Get-NetTCPConnection` and `Get-HotFix`. It installs the "Vigia inventory" task as SYSTEM, its key is readable only by SYSTEM and Administrators, and `VIGIA_DRYRUN=1` / `VIGIA_UNINSTALL=1` are supported.
+- **`vigia-collect.sh`** gains `--listening`, `--av`, `--software` and `--all`, plus macOS support (`sw_vers`, `lsof`, applications, XProtect). It reads its address and key from `/etc/vigia/agent.env`. **`deploy/vigia-install.sh`** is the one-line installer, with `--uninstall`.
+- **Email channel:** a built-in SMTP client (`smtp.mjs`, still zero dependencies) with implicit TLS (465) or STARTTLS (587), AUTH PLAIN/LOGIN and verified certificates. A password is never sent without TLS, except to `localhost`. P1/P2 alerts, the digest and the canary go to `MAIL_TO` with the acknowledge link and a dashboard link. Configured with `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` and `MAIL_TO`.
+- API: `POST /api/enroll-token` (dashboard), `POST /api/enroll` (install-line token, rate-limited), `GET /agent/install.sh|vigia-collect.sh|vigia-agent.ps1`.
+- Dashboard: a **Computers and servers** section on each client (OS, antivirus, software count, last update, listening ports, alerts) and an **Add computers** screen with copy buttons. It warns when Vigía is on localhost or plain HTTP.
+- `npm run demo` adds two computers through the real install-line endpoints: a Windows PC with problems and a Mac.
+
+### Security (from an independent review before release)
+- The address in the install line comes from `PUBLIC_URL`, or from the request only when it is a plain URL, so a forged `Host` header cannot inject commands.
+- Installers refuse plain HTTP outside private networks (`VIGIA_INSECURE=1` to override). On Windows, `C:\ProgramData\Vigia` is owned by Administrators and stripped of inherited permissions, and a folder that is a link is refused before anything runs as SYSTEM.
+- Email is never sent in plain text to a remote server (`SMTP_ALLOW_PLAIN=true` to allow it for a relay without a password), and addresses are validated before they reach an SMTP command or header.
+- Bad install-line tokens have their own rate limit, separate from dashboard logins.
+- A push without antivirus, update or port data no longer closes those alerts.
+- The dashboard editor reads `inventory.json` after the request body arrives, so a computer registered meanwhile is never overwritten.
+- Agent scripts drop control characters from names before building JSON.
+
 ## 0.11.0 — 2026-10-23
 
 ### Added

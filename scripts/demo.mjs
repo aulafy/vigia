@@ -1,4 +1,5 @@
-// `npm run demo`: Vigía with three demo clients, local sites (one down), declared firewalls and backups reporting in.
+// `npm run demo`: Vigía with three demo clients, local sites (one down), declared firewalls, backups reporting in,
+// and two computers added through the install line (a Windows PC with problems and a Mac).
 // Everything lives in a temporary folder; your data/ is not touched. Real public feeds (KEV, OSV, EPSS…) are used.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -45,7 +46,30 @@ const checkin = async (asset, job, status, body = '') => {
   const sig = crypto.createHmac('sha256', key).update(`${ts}.${p}.${body}`).digest('hex');
   await fetch(`http://127.0.0.1:${PORT}${p}`, { method: 'POST', headers: { 'x-vigia-timestamp': String(ts), 'x-vigia-signature': sig }, body });
 };
+// computers: enrolled with a token, as the install line does, then a signed inventory
+const { signEnroll } = await import('../lib.mjs');
+async function computer(client, host, parts) {
+  const token = signEnroll(SECRET, client, Math.floor(Date.now() / 1000) + 3600), machineId = crypto.createHash('sha256').update(host).digest('hex');
+  const e = await (await fetch(`http://127.0.0.1:${PORT}/api/enroll`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, host, machineId }) })).json();
+  const body = JSON.stringify({ host, parts }), p = `/api/inventory/${e.asset}`, ts = Math.floor(Date.now() / 1000);
+  const sig = crypto.createHmac('sha256', e.key).update(`${ts}.${p}.${body}`).digest('hex');
+  await fetch(`http://127.0.0.1:${PORT}${p}`, { method: 'POST', headers: { 'x-vigia-timestamp': String(ts), 'x-vigia-signature': sig }, body });
+}
+const daysAgo = d => new Date(Date.now() - d * 864e5).toISOString();
 setTimeout(async () => {
   await checkin('acme-shop', 'db', 'success', JSON.stringify({ bytes: 2_400_000_000, restoreTest: true }));
   await checkin('dental', 'nas', 'fail', JSON.stringify({ message: 'NAS unreachable: no space left on device' }));
+  await computer('Clínica Dental Sol', 'RECEPCION', [
+    { kind: 'os', id: 'windows', productName: 'Windows 10 Pro', displayVersion: '22H2', build: 19045, edition: 'Professional' },
+    { kind: 'av', products: [{ name: 'Microsoft Defender', enabled: true, realTime: false, upToDate: false, signaturesAt: daysAgo(20) }] },
+    { kind: 'software', items: [{ name: 'Google Chrome', version: '120.0.6099.130' }, { name: 'WinRAR 6.02 (64-bit)', version: '6.02' }, { name: 'AnyDesk', version: '7.1.0' }, { name: 'Gesden', version: '5.2' }] },
+    { kind: 'listening', ports: [{ proto: 'tcp', addr: '0.0.0.0', port: 3389, process: 'svchost' }, { proto: 'tcp', addr: '0.0.0.0', port: 445, process: 'System' }, { proto: 'tcp', addr: '0.0.0.0', port: 7070, process: 'AnyDesk' }] },
+    { kind: 'patches', lastInstalled: daysAgo(74), id: 'KB5039211' },
+  ]);
+  await computer('Clínica Dental Sol', 'Mac-Direccion', [
+    { kind: 'os', id: 'macos', version: '15.1', name: 'macOS 15.1' },
+    { kind: 'av', products: [{ name: 'XProtect', enabled: true }] },
+    { kind: 'software', items: [{ name: 'Google Chrome', version: '141.0.7390.66' }, { name: 'zoom.us', version: '6.2.0' }] },
+    { kind: 'listening', ports: [{ proto: 'tcp', addr: '127.0.0.1', port: 631, process: 'cupsd' }] },
+  ]);
 }, 1500);

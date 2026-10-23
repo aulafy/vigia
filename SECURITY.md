@@ -14,4 +14,6 @@ We aim to acknowledge reports within 72 hours.
 - `/healthz` is unauthenticated and reveals only that Vigía is alive.
 - Vigía refuses to listen beyond localhost without `DASH_PASS` (override: `ALLOW_NO_PASSWORD=true`, only behind an authenticating proxy). Ten failed logins from one address block it for 10 minutes.
 - Signed check-ins and pushes must move forward in time per asset and endpoint, so old captured calls cannot be replayed.
+- Install lines for computers carry a token that names one client and expires (`ENROLL_DAYS`), signed with `CHECKIN_SECRET`. Whoever has a line can add computers to that client until it expires. Every addition shows in the dashboard and in a daily P3 note. A computer registers with a hashed machine id and receives its own derived key; ten invalid tokens from one address block it for 10 minutes. Serve Vigía over HTTPS when computers register from outside your network.
+- The email channel verifies the SMTP server's certificate and never sends a password without TLS, except to `localhost`.
 - `ACK_SECRET` signs acknowledge links. Each link is bound to one alert instance and expires (`ACK_LINK_DAYS`). Rotating it invalidates every link already sent.

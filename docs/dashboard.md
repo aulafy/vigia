@@ -10,7 +10,7 @@ Vigía's dashboard is a web app with no build step and no dependencies, and you 
 |---|---|
 | **Today** | One glance: overall status (all clear / needs attention / act now), sites up, open P1 and P2 alerts, the urgent list, and the health of alert channels and data feeds. |
 | **Alerts** | Everything Vigía found. Filter by unacknowledged or all, by priority and by client, and search the text. **Acknowledge** or **Accept change** from each row. Long texts show 3 lines; click to read the rest. |
-| **Clients** | One row per company, worst first, and **Add asset**. Opening a client shows its open alerts, every asset (status, response time, certificate, availability) with **Edit** and **Pause**, its devices, backups, maintenance windows and monthly report. |
+| **Clients** | One row per company, worst first, and **Add asset**. Opening a client shows its open alerts, every asset (status, response time, certificate, availability) with **Edit** and **Pause**, its **computers and servers** (OS, antivirus, programs, last update, listening ports), devices, backups, maintenance windows and monthly report. **Add computers** creates the install line ([computers.md](computers.md)). |
 | **Devices** | Every firewall, VPN gateway and remote-access tool across clients, with its version, open alerts and an **exposed admin** badge when the management interface answers from the Internet. |
 | **Backups** | Every backup job: last good run, last restore test, size and any problem. |
 | **Reports** | This month's and last month's report for every client, ready to print or save as PDF. |

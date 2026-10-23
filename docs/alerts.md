@@ -36,6 +36,29 @@ For more privacy, [self-host ntfy](https://docs.ntfy.sh/install/), or use a prot
 
 Telegram cannot bypass silent mode the way ntfy can. Use it as a second channel, not the only one.
 
+## Email
+
+P1 and P2 alerts, the daily digest and the weekly canary also go by email, to one or more addresses. Vigía speaks SMTP itself (no dependencies): implicit TLS on port 465, or STARTTLS on 587.
+
+```bash
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587                    # 465 = implicit TLS; 587 = STARTTLS
+SMTP_USER=alerts@example.com
+SMTP_PASS=...                    # an app password where the provider requires one
+MAIL_FROM="Vigía <alerts@example.com>"
+MAIL_TO=you@example.com,colleague@example.com
+```
+
+| Provider | Host and port | Notes |
+|---|---|---|
+| Google Workspace / Gmail | `smtp.gmail.com`, 587 | Needs 2-step verification and an [app password](https://myaccount.google.com/apppasswords) |
+| Microsoft 365 | `smtp.office365.com`, 587 | SMTP AUTH must be enabled for that mailbox |
+| Your own relay (Postfix…) | `localhost`, 25 | Without TLS, Vigía only sends a password to `localhost` |
+
+Each email has the priority in the subject (`P1 …`), is marked high importance for P1, and carries the acknowledge link when `PUBLIC_URL` and `ACK_SECRET` are set, plus a link to the dashboard. The certificate of the server is always verified. Nothing is sent without TLS except to `localhost` (`SMTP_ALLOW_PLAIN=true` allows it for a relay without a password), and invalid addresses in `MAIL_TO` are ignored with a warning at start-up.
+
+Email is slow and easy to miss at night: use it as a second channel, or for the people who want the daily digest, not as the only way a P1 reaches you. **Settings → Channels** shows whether delivery works, and **Send test alert** tries every channel.
+
 ## Webhook: phone calls and escalation
 
 `WEBHOOK_URL` receives a `POST` with this JSON body for every P1 and P2:

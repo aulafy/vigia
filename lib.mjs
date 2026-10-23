@@ -1,5 +1,6 @@
 // Pure logic: no I/O, so it can be unit tested (see test/lib.test.mjs).
 import crypto from 'node:crypto';
+import { suggestId, ID_RE } from './public/validate.js';
 
 const LEVELS = { alta: 'high', media: 'medium', baja: 'low' };
 
@@ -54,7 +55,7 @@ export function loadInventory(list) {
     const a = normalizeAsset(raw || {});
     if (!a.id) return errors.push(`#${i}: missing "id"`);
     if (ids.has(a.id)) return errors.push(`${a.id}: duplicate id`);
-    if (!a.url && !a.domain && !a.edge.length) return errors.push(`${a.id}: needs "url", "domain" or "edge" devices`);
+    if (!a.url && !a.domain && !a.edge.length && !a.machine) return errors.push(`${a.id}: needs "url", "domain", "edge" devices or "machine"`);
     a.edge.forEach((d, j) => { if (!d?.type) errors.push(`${a.id}: edge[${j}] needs a "type"`); });
     if (!['high', 'medium', 'low'].includes(a.criticality)) errors.push(`${a.id}: criticality must be high, medium or low`);
     ids.add(a.id);
@@ -89,6 +90,8 @@ export function matchCycle(cycles, version) {
     .filter(c => v === String(c.cycle) || v.startsWith(`${c.cycle}.`))
     .sort((x, y) => String(y.cycle).length - String(x.cycle).length)[0] || null;
 }
+// Windows carries several candidate cycles ("11-24h2-e-lts", "11-24h2-e", "11-24h2"): the first that exists wins
+export const matchCycles = (cycles, versions) => versions.map(v => cycles.find(c => String(c.cycle) === String(v))).find(Boolean) || null;
 
 export function eolDays(cycle, now = Date.now()) {
   if (!cycle || cycle.eol === false || cycle.eol == null) return null;
@@ -431,7 +434,7 @@ const RUNTIME = { php: {}, nodejs: {}, node: { eol: 'nodejs', product: 'nodejs' 
   mysql: {}, mariadb: {}, postgresql: {}, redis: {}, openssl: {}, wordpress: {} };
 
 export function parsePush(body) {
-  const stack = [], errors = [];
+  const stack = [], errors = [], machine = {};
   for (const [i, part] of (Array.isArray(body?.parts) ? body.parts : []).entries()) {
     try {
       switch (part?.kind) {
@@ -446,9 +449,32 @@ export function parsePush(body) {
         case 'spdx': stack.push(...spdxItems(part.doc)); break;
         case 'os': {
           const id = String(part.id || '').toLowerCase();
-          if (OS_EOL[id] && part.version) stack.push({ product: id, eol: OS_EOL[id], version: String(part.version) });
+          if (id === 'windows') {
+            const w = windowsOs(part);
+            machine.platform = 'windows'; machine.os = w.label;
+            if (w.item) stack.push(w.item);
+          } else if (id === 'macos') {
+            machine.platform = 'macos'; machine.os = `macOS ${part.version || ''}`.trim();
+            // `behind`: compared with the latest release of its cycle (macOS updates are not automatic everywhere)
+            if (part.version) stack.push({ product: 'macos', eol: 'macos', version: String(part.version), behind: true });
+          } else {
+            if (part.name || part.version) { machine.platform ||= 'linux'; machine.os = String(part.name || `${id} ${part.version || ''}`).trim().slice(0, 80); }
+            if (OS_EOL[id] && part.version) stack.push({ product: id, eol: OS_EOL[id], version: String(part.version) });
+          }
           break;
         }
+        case 'software': {
+          const items = (Array.isArray(part.items) ? part.items : []).filter(x => x?.name).slice(0, MAX_SOFTWARE)
+            .map(x => ({ name: clip(x.name, 120), version: x.version ? clip(x.version, 40) : undefined, publisher: x.publisher ? clip(x.publisher, 80) : undefined }));
+          machine.software = items;
+          stack.push(...items.map(softwareItem).filter(Boolean));
+          break;
+        }
+        case 'listening': machine.listening = normListening(part.ports); break;
+        case 'av': machine.av = (Array.isArray(part.products) ? part.products : []).slice(0, 10).map(p => ({
+          name: clip(p?.name || '?', 80), enabled: typeof p?.enabled === 'boolean' ? p.enabled : null, realTime: typeof p?.realTime === 'boolean' ? p.realTime : null,
+          upToDate: typeof p?.upToDate === 'boolean' ? p.upToDate : null, signaturesAt: Date.parse(p?.signaturesAt) || null, version: p?.version ? clip(p.version, 40) : null })); break;
+        case 'patches': machine.patches = { lastInstalled: Date.parse(part.lastInstalled) || null, id: part.id ? clip(part.id, 20) : null }; break;
         case 'runtime': {
           const n = String(part.name || '').toLowerCase(), r = RUNTIME[n];
           if (r && part.version) stack.push({ product: r.product || n, eol: r.eol || n, version: String(part.version).replace(/^v/, ''), ...(r.kev && { kev: r.kev }) });
@@ -459,9 +485,143 @@ export function parsePush(body) {
     } catch (e) { errors.push(`part ${i} (${part?.kind}): ${e.message}`); }
   }
   const all = dedupeStack(stack);
-  return { stack: all.slice(0, MAX_PUSH), errors, total: all.length, truncated: all.length > MAX_PUSH };
+  return { stack: all.slice(0, MAX_PUSH), errors, total: all.length, truncated: all.length > MAX_PUSH, machine: Object.keys(machine).length ? machine : null };
 }
 export const MAX_PUSH = 20_000;
+const MAX_SOFTWARE = 3000;
+
+// ---------- Computers and servers: what the agent reports about the machine itself ----------
+// endoflife.date ids its Windows cycles "11-24h2-w" (Home/Pro), "11-24h2-e" (Enterprise/Education), "10-22h2", "2022" (Server)
+export function windowsOs({ productName = '', displayVersion = '', build = 0, edition = '', installationType = '' } = {}) {
+  const server = /server/i.test(`${installationType} ${productName}`);
+  if (server) {
+    const m = /Server (\d{4})(?: (R2))?/i.exec(productName), cycle = m ? `${m[1]}${m[2] ? '-r2' : ''}` : null;
+    return { label: clip(productName || 'Windows Server', 80), item: cycle && { product: 'windows server', eol: 'windows-server', version: cycle.replace('-r2', ' R2'), cycles: [cycle] } };
+  }
+  const major = +build >= 22000 ? 11 : 10, dv = String(displayVersion || '').toLowerCase(); // ProductName still says "Windows 10" on 11
+  const ed = /enterprise|education|iot/i.test(edition) ? 'e' : 'w', lts = /ltsc|ltsb/i.test(`${edition} ${productName}`);
+  const label = `Windows ${major}${dv ? ` ${dv.toUpperCase()}` : ''}${edition ? ` (${edition})` : ''}`;
+  if (!dv) return { label, item: null };
+  const cycles = [...(lts ? [`${major}-${dv}-${/iot/i.test(edition) ? 'iot' : 'e'}-lts`] : []), `${major}-${dv}-${ed}`, `${major}-${dv}`];
+  return { label, item: { product: 'windows', eol: 'windows', version: `${major} ${dv.toUpperCase()}`, cycles } };
+}
+
+// Installed programs worth watching: the ones attackers go after, mapped to their CISA KEV names.
+// `kevPrio: 'P3'` for software that updates itself (browsers, Office, Zoom): a KEV entry is news, not an emergency.
+const SOFTWARE = [
+  [/^google chrome$/i, 'Google Chrome', ['chromium', 'google chrome'], 'P3'],
+  [/^microsoft edge$/i, 'Microsoft Edge', ['microsoft edge'], 'P3'],
+  [/^(mozilla )?firefox\b/i, 'Mozilla Firefox', ['firefox'], 'P3'],
+  [/^microsoft (office|365)\b/i, 'Microsoft Office', ['microsoft office'], 'P3'],
+  [/^zoom(\.us| workplace)?\b/i, 'Zoom', ['zoom'], 'P3'],
+  [/^7-zip\b/i, '7-Zip', ['7-zip']],
+  [/^winrar\b/i, 'WinRAR', ['winrar']],
+  [/^adobe acrobat\b/i, 'Adobe Acrobat / Reader', ['acrobat']],
+  [/^foxit (pdf )?(reader|editor)/i, 'Foxit PDF', ['foxit']],
+  [/^java( \d+)?( update \d+)?$|^java\(tm\)|^oracle java/i, 'Oracle Java', ['java se', 'java runtime environment']],
+  [/^notepad\+\+/i, 'Notepad++', ['notepad++']],
+  [/^anydesk\b/i, 'AnyDesk', ['anydesk']],
+  [/^teamviewer\b/i, 'TeamViewer', ['teamviewer']],
+  [/screenconnect/i, 'ConnectWise ScreenConnect', ['screenconnect']],
+  [/simplehelp/i, 'SimpleHelp', ['simplehelp']],
+  [/^splashtop/i, 'Splashtop', ['splashtop']],
+  [/^filezilla\b/i, 'FileZilla', ['filezilla']],
+  [/^winscp\b/i, 'WinSCP', ['winscp']],
+  [/^putty\b/i, 'PuTTY', ['putty']],
+  [/^vlc( media player)?\b/i, 'VLC', ['vlc']],
+  [/^veeam backup/i, 'Veeam Backup & Replication', ['veeam']],
+  [/^papercut/i, 'PaperCut', ['papercut']],
+  [/manageengine/i, 'ManageEngine', ['manageengine']],
+  [/moveit/i, 'MOVEit', ['moveit']],
+  [/goanywhere/i, 'GoAnywhere MFT', ['goanywhere']],
+  [/crushftp/i, 'CrushFTP', ['crushftp']],
+  [/wing ftp/i, 'Wing FTP Server', ['wing ftp']],
+  [/centrestack|triofox/i, 'Gladinet CentreStack', ['centrestack', 'triofox']],
+  [/^forticlient/i, 'FortiClient', ['forticlient']],
+  [/^globalprotect/i, 'GlobalProtect', ['globalprotect']],
+  [/^cisco (anyconnect|secure client)/i, 'Cisco Secure Client', ['anyconnect', 'secure client']],
+  [/^openvpn\b/i, 'OpenVPN', ['openvpn']],
+  [/^microsoft exchange server/i, 'Microsoft Exchange Server', ['exchange server']],
+  [/^microsoft sql server \d{4}( \(64-bit\))?$/i, 'Microsoft SQL Server', ['sql server']],
+  [/^citrix workspace/i, 'Citrix Workspace', ['workspace app']],
+  [/^vmware (workstation|player)/i, 'VMware Workstation', ['vmware workstation']],
+  [/^vmware tools$/i, 'VMware Tools', ['vmware tools']],
+];
+export function softwareItem(sw) {
+  const hit = SOFTWARE.find(([re]) => re.test(String(sw?.name || '').trim()));
+  if (!hit) return null;
+  const [, product, kev, kevPrio] = hit;
+  return { product, kev, sw: true, ...(sw.version && { version: String(sw.version) }), ...(kevPrio && { kevPrio }) };
+}
+export const softwareCatalogue = () => SOFTWARE.map(([, product]) => product);
+
+// Listening sockets: deduplicated, and marked "network" when bound beyond loopback
+const LOOPBACK = /^(127\.|::1$|::ffff:127\.|localhost$|\[::1\]$)/i;
+export function normListening(list) {
+  const seen = new Map();
+  for (const p of Array.isArray(list) ? list : []) {
+    const port = +p?.port, proto = String(p?.proto || 'tcp').toLowerCase().replace(/[46]$/, '');
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !['tcp', 'udp'].includes(proto)) continue;
+    const addr = String(p.addr ?? '*').replace(/%.*$/, '').slice(0, 64), net = !LOOPBACK.test(addr);
+    const k = `${proto}/${port}`, prev = seen.get(k);
+    // the same port on 127.0.0.1 and 0.0.0.0 counts as the network one
+    if (!prev || (net && !prev.network)) seen.set(k, { proto, port, addr, network: net, ...(p.process && { process: clip(p.process, 60) }) });
+  }
+  return [...seen.values()].sort((a, b) => a.port - b.port).slice(0, 500);
+}
+export const networkPorts = listening => (listening || []).filter(p => p.network).map(p => `${p.proto}/${p.port}`);
+
+// Services that should not answer on the network of a small business. Windows always listens on 135/139/445: not news there.
+export const RISKY_PORTS = { 21: 'FTP', 23: 'Telnet', 445: 'SMB', 1433: 'SQL Server', 2375: 'Docker API', 3306: 'MySQL', 3389: 'RDP',
+  5432: 'PostgreSQL', 5900: 'VNC', 5901: 'VNC', 6379: 'Redis', 9200: 'Elasticsearch', 11211: 'memcached', 27017: 'MongoDB' };
+const NO_AUTH = new Set([2375]); // anyone who reaches it is root on the host
+
+/**
+ * machineFindings(machine, now) → [{ kind, prio, ... }]
+ * av: Windows without an active antivirus (P2) · avold: signatures older than 7 days (P3)
+ * patch: Windows without updates for 45 days (P3) or 90 (P2) · risky: risky services listening on the network (P3; Docker API P2)
+ */
+export function machineFindings(m, now = Date.now()) {
+  const out = [], days = t => Math.floor((now - t) / 864e5);
+  const av = m?.av;
+  if (m?.platform === 'windows' && Array.isArray(av)) {
+    const active = av.filter(p => p.enabled !== false && p.realTime !== false);
+    if (!active.length) out.push({ kind: 'av', prio: 'P2', products: av.map(p => p.name) });
+  }
+  const old = (av || []).filter(p => p.enabled !== false && (p.upToDate === false || (p.signaturesAt && days(p.signaturesAt) > 7)));
+  if (old.length) out.push({ kind: 'avold', prio: 'P3', products: old.map(p => p.name), days: old.map(p => p.signaturesAt).filter(Boolean).map(days).sort((a, b) => b - a)[0] ?? null });
+  const last = m?.patches?.lastInstalled;
+  if (m?.platform === 'windows' && last && days(last) > 45) out.push({ kind: 'patch', prio: days(last) > 90 ? 'P2' : 'P3', days: days(last), id: m.patches.id });
+  const risky = (m?.listening || []).filter(p => p.network && p.proto === 'tcp' && RISKY_PORTS[p.port] && !(m.platform === 'windows' && p.port === 445));
+  if (risky.length) out.push({ kind: 'risky', prio: risky.some(p => NO_AUTH.has(p.port)) ? 'P2' : 'P3',
+    services: risky.map(p => `${RISKY_PORTS[p.port]} (${p.proto}/${p.port}${p.process ? `, ${p.process}` : ''})`) });
+  return out;
+}
+
+// ---------- Enrolment: one line on a computer adds it to a client ----------
+// The token names the client and expires; it is signed with CHECKIN_SECRET, so nothing has to be stored
+export function signEnroll(secret, client, expSec) {
+  const sig = crypto.createHmac('sha256', secret).update(`vigia-enroll|${client}|${expSec}`).digest('hex').slice(0, 32);
+  return `${Buffer.from(client, 'utf8').toString('base64url')}.${expSec}.${sig}`;
+}
+export function verifyEnroll(secret, token, now = Date.now()) {
+  const [c, exp, sig] = String(token || '').split('.');
+  if (!secret || !c || !/^\d{1,12}$/.test(exp || '') || !/^[0-9a-f]{32}$/.test(sig || '') || +exp * 1000 < now) return null;
+  const client = Buffer.from(c, 'base64url').toString('utf8');
+  const want = Buffer.from(signEnroll(secret, client, +exp).split('.')[2]);
+  return want.length === sig.length && crypto.timingSafeEqual(want, Buffer.from(sig)) ? client : null;
+}
+// Re-running the line on the same computer reuses its asset; a different computer with the same name gets "-2"
+export function enrollTarget(list, { client, host, machineId }) {
+  const same = list.find(a => a.machineId && a.machineId === machineId && (a.client ?? a.cliente) === client);
+  if (same) return { id: same.id, existing: true };
+  const ids = new Set(list.map(a => a.id));
+  let base = suggestId(client, host).slice(0, 58).replace(/-+$/, '');
+  if (!ID_RE.test(base)) base = `pc-${machineId.slice(0, 8)}`;
+  let id = base;
+  for (let n = 2; ids.has(id); n++) id = `${base}-${n}`;
+  return { id, existing: false };
+}
 
 const stackKey = s => (s.wp ? `wp:${wpKey(s)}@${s.version}` : s.ecosystem ? `${s.ecosystem}:${s.name}@${s.version}` : `${s.product}@${s.version}`);
 export function dedupeStack(list) {
